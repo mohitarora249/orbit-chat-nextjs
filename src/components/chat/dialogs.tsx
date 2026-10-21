@@ -262,7 +262,7 @@ export function WorkspaceMenu({ workspace, me, onCreateChannel, onHelp, onSignOu
   );
 }
 
-export type NotificationPrefs = { desktop: boolean; muted: string[] };
+export type NotificationPrefs = { desktop: boolean; sound: boolean; muted: string[] };
 
 export function NotificationsMenu({ prefs, onChange, conversation, label, onClose }: {
   prefs: NotificationPrefs;
@@ -291,13 +291,19 @@ export function NotificationsMenu({ prefs, onChange, conversation, label, onClos
           {permission === "unsupported" ? "Not supported in this browser." : permission === "denied" ? "Blocked in your browser settings." : "For direct messages and @mentions when you are not looking at that conversation."}
         </span></span>
       </label>
+      <label className="mt-3 flex items-start gap-3">
+        <input type="checkbox" checked={prefs.sound} onChange={() => onChange({ ...prefs, sound: !prefs.sound })} className="mt-0.5 accent-brand-600"/>
+        <span><span className="font-medium">Sounds</span><span className="mt-0.5 block text-[11px] text-zinc-500">
+          A soft blip for new messages, a chime for direct messages and @mentions.
+        </span></span>
+      </label>
       {conversation && (
         <button onClick={() => onChange({ ...prefs, muted: muted ? prefs.muted.filter(id => id !== conversation.id) : [...prefs.muted, conversation.id] })}
           className="mt-4 flex w-full items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 font-medium transition hover:bg-zinc-50">
           {muted ? <Bell size={14}/> : <BellOff size={14}/>}{muted ? "Unmute" : "Mute"} {conversation.type === "CHANNEL" ? "#" : ""}{label}
         </button>
       )}
-      <p className="mt-3 text-[11px] text-zinc-400">Muted conversations still show unread counts but never notify. Preferences are saved in this browser.</p>
+      <p className="mt-3 text-[11px] text-zinc-400">Muted conversations still show unread counts but never notify or play sounds. Preferences are saved in this browser.</p>
     </Popover>
   );
 }

@@ -15,6 +15,7 @@ import { CommandPalette, CreateChannelDialog, HelpDialog, NotificationsMenu, Wor
 import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mentionsUser, mergeMessages, upsertMessage } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
+import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
 import type { ActivityItem, Bootstrap, ChatAttachment, ChatMessage, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
 
@@ -35,11 +36,11 @@ const typingKey = (conversationId: string, parentId?: string | null) => `${conve
 function readPrefs(userId: string): NotificationPrefs {
   try {
     const raw = localStorage.getItem(`orbit-chat-notify:${userId}`);
-    if (raw) return { desktop: false, muted: [], ...JSON.parse(raw) };
+    if (raw) return { desktop: false, sound: true, muted: [], ...JSON.parse(raw) };
   } catch {
     // Storage can be unavailable (private mode); fall back to defaults.
   }
-  return { desktop: false, muted: [] };
+  return { desktop: false, sound: true, muted: [] };
 }
 
 export function ChatApp() {
@@ -60,7 +61,7 @@ export function ChatApp() {
   const [filter, setFilter] = useState("");
   const [showSidebar, setShowSidebar] = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
-  const [prefs, setPrefs] = useState<NotificationPrefs>({ desktop: false, muted: [] });
+  const [prefs, setPrefs] = useState<NotificationPrefs>({ desktop: false, sound: true, muted: [] });
   const [visibleTick, setVisibleTick] = useState(0);
   const [mentionToast, setMentionToast] = useState<MentionToast | null>(null);
 
@@ -317,8 +318,14 @@ export function ChatApp() {
       const where = conversation?.type === "DM" ? "a direct message" : `#${conversation?.name ?? "a channel"}`;
       setMentionToast({ message, where: message.parentId ? `a thread in ${where}` : where });
     }
+    if (fromOther && !seeing && !message.id.startsWith("optimistic-") && prefsRef.current.sound && !prefsRef.current.muted.includes(message.conversationId)) {
+      const isDm = state?.conversations.find(c => c.id === message.conversationId)?.type === "DM";
+      playSound(mentionsMe || isDm ? "mention" : "message");
+    }
     notify(message);
   }, [notify, updateConversation]);
+
+  useEffect(() => primeSounds(), []);
 
   // ---- Socket --------------------------------------------------------------------------------------------
 
