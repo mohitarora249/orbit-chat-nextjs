@@ -1,11 +1,14 @@
 import { cn } from "@/lib/utils";
 
-// A dot on an orbit: the Orbit Chat mark, drawn in CSS so it needs no asset.
+// A satellite on an orbit: the Orbit Chat mark. The satellite's dark outline cuts a gap in the ring.
+// Same drawing as src/app/icon.svg (the favicon) and src/app/apple-icon.tsx.
 export function Logo({ className }: { className?: string }) {
   return (
-    <span aria-hidden className={cn("relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-zinc-900", className)}>
-      <span className="h-3.5 w-3.5 rounded-full border-[1.5px] border-white/80"/>
-      <span className="absolute right-[7px] top-[7px] h-1.5 w-1.5 rounded-full bg-brand-400"/>
+    <span aria-hidden className={cn("flex h-7 w-7 shrink-0 rounded-lg bg-zinc-900", className)}>
+      <svg viewBox="0 0 32 32" className="h-full w-full">
+        <circle cx="16" cy="16" r="7.5" fill="none" stroke="#fff" strokeOpacity="0.85" strokeWidth="2.25"/>
+        <circle cx="21.3" cy="10.7" r="3.25" className="fill-brand-400 stroke-zinc-900" strokeWidth="1.75"/>
+      </svg>
     </span>
   );
 }
