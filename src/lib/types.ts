@@ -38,6 +38,8 @@ export type ChatPoll = {
   anonymous: boolean;
   closesAt: string | null;
   closedAt: string | null;
+  // When it was last opened again after closing (still set if it has since closed again).
+  reopenedAt: string | null;
   // People who voted (for at least one option, in a multiple-choice poll).
   voterCount: number;
   options: ChatPollOption[];
@@ -47,7 +49,11 @@ export type ChatPoll = {
 };
 
 // An interaction with part of a message, sent to POST /api/messages/:id/actions.
-export type MessageAction = { action: "poll.vote"; optionIds: string[] } | { action: "poll.close" };
+export type MessageAction =
+  | { action: "poll.vote"; optionIds: string[] }
+  | { action: "poll.close" }
+  // `closesAt` is the new closing time; without it the poll stays open until closed by hand.
+  | { action: "poll.reopen"; closesAt?: string };
 
 // The original of a forwarded message, shown as a quoted card. It is live: edits to the original show up
 // here, and a deleted original leaves only `deleted`. The card is seen by people who may not be able to see

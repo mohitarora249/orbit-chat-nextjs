@@ -346,6 +346,8 @@ model Poll {
   anonymous   Boolean      @default(false)
   closesAt    DateTime?
   closedAt    DateTime?
+  // Set when a closed poll is opened again, so results seen as final are not mistaken for these.
+  reopenedAt  DateTime?
   createdAt   DateTime     @default(now())
   message     Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
   options     PollOption[]

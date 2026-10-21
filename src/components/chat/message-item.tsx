@@ -274,8 +274,9 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
           </>
         )}
         {!deleted && message.poll && (
-          <PollCard poll={message.poll} me={me} usersById={usersById} interactive={!readOnly && !pending} canClose={mine || canModerate}
-            onVote={optionIds => onAction(message, { action: "poll.vote", optionIds })} onClosePoll={() => onAction(message, { action: "poll.close" })}/>
+          <PollCard poll={message.poll} me={me} usersById={usersById} interactive={!readOnly && !pending} canManage={mine || canModerate}
+            onVote={optionIds => onAction(message, { action: "poll.vote", optionIds })} onClosePoll={() => onAction(message, { action: "poll.close" })}
+            onReopen={closesAt => onAction(message, { action: "poll.reopen", closesAt })}/>
         )}
         {!deleted && !editing && message.linkPreviews.length > 0 && (
           <div className="mt-1.5 flex flex-col gap-2">{message.linkPreviews.map(preview => <LinkPreviewCard key={preview.url} preview={preview}/>)}</div>

@@ -38,7 +38,7 @@ attachments, link previews, forward or poll), `poll` (tallies; voter ids only in
 |---|---|---|
 | `session:ready` | none | After the server has joined the socket's rooms |
 | `message:new` | `ChatMessage` | A message or thread reply was created |
-| `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, someone voted in its poll or the poll closed, a thread got a reply, an attachment scan finished, its link previews were fetched, or the original it forwards changed |
+| `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, someone voted in its poll or the poll closed or was reopened, a thread got a reply, an attachment scan finished, its link previews were fetched, or the original it forwards changed |
 | `conversation:created` | `ConversationSummary` | A channel or DM that the user can see was created, or the user was added to a private channel. `isMember` is set for each recipient (members and everyone else get separate emits) |
 | `conversation:updated` | `ConversationDetails` (`{ id, name, topic, description, archivedAt, memberIds, memberCount }`) | A channel was renamed, its topic or description changed, it was archived or unarchived, or its members changed. Sent to the conversation's room; merge it into the summary |
 | `conversation:membership` | `{ conversationId, isMember }` | The same user joined, left, was added to or was removed from a public channel (sent to the user's own room only) |

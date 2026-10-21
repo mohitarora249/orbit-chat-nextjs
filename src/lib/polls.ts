@@ -10,6 +10,12 @@ import type { ChatMessage } from "./types";
 const CLOCK_INTERVAL_MS = 5000;
 const BATCH_SIZE = 100;
 
+// When a poll closes by itself: in the future, and within a year.
+export const pollClosesAtSchema = z.iso.datetime().refine(value => {
+  const at = new Date(value).getTime() - Date.now();
+  return at > 0 && at < POLL_MAX_OPEN_MS;
+}, "The closing time must be in the future and within a year.");
+
 // The poll part of a new message; the message body is the question.
 export const pollInputSchema = z.object({
   options: z.array(z.string().trim().min(1, "Options can't be empty.").max(POLL_OPTION_MAX, `Options can be up to ${POLL_OPTION_MAX} characters.`))
@@ -18,10 +24,7 @@ export const pollInputSchema = z.object({
     .refine(options => new Set(options.map(option => option.toLowerCase())).size === options.length, "Each option must be different."),
   multiSelect: z.boolean().default(false),
   anonymous: z.boolean().default(false),
-  closesAt: z.iso.datetime().refine(value => {
-    const at = new Date(value).getTime() - Date.now();
-    return at > 0 && at < POLL_MAX_OPEN_MS;
-  }, "The closing time must be in the future and within a year.").optional()
+  closesAt: pollClosesAtSchema.optional()
 });
 export type PollInput = z.infer<typeof pollInputSchema>;
 
@@ -85,6 +88,15 @@ export async function closePoll(tx: Prisma.TransactionClient, poll: PollForActio
   await tx.poll.update({ where: { id: poll.id }, data: { closedAt: new Date() } });
   await enqueue(tx, "message.updated", { messageId: poll.messageId });
   return true;
+}
+
+// Opens a closed poll again, with a new closing time or none. Votes cast before it closed are kept. Also
+// works on a poll whose closing time has just passed but that the clock has not closed yet; replacing
+// closesAt in the same update means the clock cannot close it again straight away.
+export async function reopenPoll(tx: Prisma.TransactionClient, poll: PollForAction, closesAt: string | undefined) {
+  if (!isPollClosed(poll)) throw new HttpError(409, "This poll is already open.");
+  await tx.poll.update({ where: { id: poll.id }, data: { closedAt: null, closesAt: closesAt ? new Date(closesAt) : null, reopenedAt: new Date() } });
+  await enqueue(tx, "message.updated", { messageId: poll.messageId });
 }
 
 // Closes polls whose closing time has passed and queues their update in the same transaction, like the

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ARCHIVED_ERROR, isWorkspaceAdmin, requireMessageAccess } from "@/lib/access";
 import { messageSelect, serializeMessage } from "@/lib/messages";
-import { castVote, closePoll, loadPollForAction, withMyVotes } from "@/lib/polls";
+import { castVote, closePoll, loadPollForAction, pollClosesAtSchema, reopenPoll, withMyVotes } from "@/lib/polls";
 import { POLL_MAX_OPTIONS } from "@/lib/commands";
 import { requireUser } from "@/lib/session";
 import { notifyOutbox } from "@/lib/outbox";
@@ -18,7 +18,9 @@ type Context = { params: Promise<{ messageId: string }> };
 const actionSchema = z.discriminatedUnion("action", [
   // Replaces the viewer's choices; an empty list takes their vote back.
   z.object({ action: z.literal("poll.vote"), optionIds: z.array(z.string().min(1).max(64)).max(POLL_MAX_OPTIONS) }),
-  z.object({ action: z.literal("poll.close") })
+  z.object({ action: z.literal("poll.close") }),
+  // Without closesAt the poll stays open until closed by hand.
+  z.object({ action: z.literal("poll.reopen"), closesAt: pollClosesAtSchema.optional() })
 ]);
 type Action = z.infer<typeof actionSchema>;
 
@@ -30,19 +32,26 @@ async function requirePoll({ tx, message }: ActionContext) {
   return poll;
 }
 
+// Closing and reopening: the author, or a workspace owner or admin (who can also delete the message).
+async function requireManagedPoll(context: ActionContext, verb: string) {
+  const poll = await requirePoll(context);
+  const { userId, message } = context;
+  if (message.authorId !== userId && !(await isWorkspaceAdmin(userId, message.conversation.workspaceId))) {
+    throw new HttpError(403, `Only the person who made the poll can ${verb} it.`);
+  }
+  return poll;
+}
+
 // Each handler runs inside the action's transaction and queues its own outbox events.
 const handlers: { [A in Action["action"]]: (context: ActionContext, input: Extract<Action, { action: A }>) => Promise<void> } = {
   "poll.vote": async (context, { optionIds }) => {
     await castVote(context.tx, await requirePoll(context), context.userId, optionIds);
   },
-  // The author, or a workspace owner or admin (who can also delete the message).
   "poll.close": async (context) => {
-    const poll = await requirePoll(context);
-    const { userId, message } = context;
-    if (message.authorId !== userId && !(await isWorkspaceAdmin(userId, message.conversation.workspaceId))) {
-      throw new HttpError(403, "Only the person who made the poll can close it.");
-    }
-    await closePoll(context.tx, poll);
+    await closePoll(context.tx, await requireManagedPoll(context, "close"));
+  },
+  "poll.reopen": async (context, { closesAt }) => {
+    await reopenPoll(context.tx, await requireManagedPoll(context, "reopen"), closesAt);
   }
 };
 

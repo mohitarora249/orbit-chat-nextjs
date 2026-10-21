@@ -16,6 +16,7 @@ const pollSelect = {
     anonymous: true,
     closesAt: true,
     closedAt: true,
+    reopenedAt: true,
     options: {
       select: { id: true, label: true, votes: { select: { userId: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] } },
       orderBy: { position: "asc" }
@@ -84,6 +85,7 @@ function serializePoll(poll: NonNullable<SelectedMessage["poll"]>, showVoters: b
     anonymous: poll.anonymous,
     closesAt: poll.closesAt?.toISOString() ?? null,
     closedAt: poll.closedAt?.toISOString() ?? null,
+    reopenedAt: poll.reopenedAt?.toISOString() ?? null,
     voterCount: voters.size,
     options: poll.options.map(option => ({
       id: option.id,

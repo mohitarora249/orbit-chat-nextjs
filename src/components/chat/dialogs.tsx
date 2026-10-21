@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, Popover } from "@/components/ui/overlay";
 import { dayLabel, timeLabel } from "@/components/chat/helpers";
 import { ForwardedCard, forwardSourceLabel } from "@/components/chat/message-item";
+import { POLL_DURATIONS, pollClosesAt } from "@/components/chat/poll";
 import { api } from "@/lib/api";
 import { POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_MAX, POLL_QUESTION_MAX } from "@/lib/commands";
 import { mentionsToText } from "@/lib/mentions";
@@ -204,14 +205,6 @@ export function CreateChannelDialog({ users, me, onCreated, onClose }: { users: 
 
 export type PollDraft = { question: string; options: string[]; multiSelect: boolean; anonymous: boolean; closesAt?: string };
 
-const POLL_DURATIONS: { label: string; ms: number | null }[] = [
-  { label: "Never", ms: null },
-  { label: "In 1 hour", ms: 60 * 60 * 1000 },
-  { label: "In 1 day", ms: 24 * 60 * 60 * 1000 },
-  { label: "In 3 days", ms: 3 * 24 * 60 * 60 * 1000 },
-  { label: "In 1 week", ms: 7 * 24 * 60 * 60 * 1000 }
-];
-
 // Opened by /poll, prefilled from its arguments. `onCreate` posts the poll and throws to show an error.
 export function CreatePollDialog({ initial, onCreate, onClose }: {
   initial: Pick<PollDraft, "question" | "options">;
@@ -252,9 +245,8 @@ export function CreatePollDialog({ initial, onCreate, onClose }: {
     if (duplicate) { setError("Each option must be different."); return; }
     setPending(true);
     setError("");
-    const ms = POLL_DURATIONS[duration].ms;
     try {
-      await onCreate({ question: question.trim(), options: filled, multiSelect, anonymous, closesAt: ms ? new Date(Date.now() + ms).toISOString() : undefined });
+      await onCreate({ question: question.trim(), options: filled, multiSelect, anonymous, closesAt: pollClosesAt(duration) });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not post the poll.");
       setPending(false);
