@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatUser, ConversationSummary } from "@/lib/types";
+import type { ChatMessage, ChatPoll, ChatUser, ConversationSummary } from "@/lib/types";
 
 export function timeLabel(value: string) {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value));
@@ -50,4 +50,41 @@ export function conversationLabel(conversation: Pick<ConversationSummary, "type"
 
 export function dmPartnerId(conversation: ConversationSummary, meId: string) {
   return conversation.memberIds.find(id => id !== meId) ?? meId;
+}
+
+// The viewer's choices in a poll. Named polls list voters, so they are read from there and stay current with
+// every broadcast; anonymous polls only know what the server last told this viewer.
+export function myPollVotes(poll: ChatPoll, meId: string) {
+  if (!poll.anonymous) return poll.options.filter(option => option.userIds.includes(meId)).map(option => option.id);
+  return poll.myVotes ?? [];
+}
+
+export function isPollClosed(poll: ChatPoll, now = Date.now()) {
+  return poll.closedAt !== null || (poll.closesAt !== null && new Date(poll.closesAt).getTime() <= now);
+}
+
+// Broadcasts carry `myVotes: null` (they go to everyone), so an update keeps the choices we already knew.
+export function keepMyVotes(previous: ChatMessage, next: ChatMessage): ChatMessage {
+  if (!next.poll || next.poll.myVotes !== null || !previous.poll?.myVotes) return next;
+  return { ...next, poll: { ...next.poll, myVotes: previous.poll.myVotes } };
+}
+
+// The poll as it will be once the viewer's choices are `optionIds`, shown while the vote is being saved.
+export function withVote(poll: ChatPoll, meId: string, optionIds: string[]): ChatPoll {
+  const before = myPollVotes(poll, meId);
+  return {
+    ...poll,
+    voterCount: poll.voterCount - (before.length ? 1 : 0) + (optionIds.length ? 1 : 0),
+    options: poll.options.map(option => {
+      const was = before.includes(option.id);
+      const is = optionIds.includes(option.id);
+      if (was === is) return option;
+      return {
+        ...option,
+        votes: option.votes + (is ? 1 : -1),
+        userIds: poll.anonymous ? option.userIds : is ? [...option.userIds, meId] : option.userIds.filter(id => id !== meId)
+      };
+    }),
+    myVotes: optionIds
+  };
 }

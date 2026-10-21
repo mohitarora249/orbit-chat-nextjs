@@ -27,6 +27,28 @@ export type ChatLinkPreview = {
   imageUrl: string | null;
 };
 
+export type ChatPollOption = { id: string; label: string; votes: number; userIds: string[] };
+
+// A poll attached to a message; the message body is the question. `userIds` lists who chose each option,
+// and is always empty in anonymous polls and in forwarded copies. A poll is closed once `closedAt` is set,
+// which happens within a few seconds of `closesAt`.
+export type ChatPoll = {
+  id: string;
+  multiSelect: boolean;
+  anonymous: boolean;
+  closesAt: string | null;
+  closedAt: string | null;
+  // People who voted (for at least one option, in a multiple-choice poll).
+  voterCount: number;
+  options: ChatPollOption[];
+  // The viewer's own choices (option ids). Per-viewer, so it is set only on responses to the viewer's own
+  // requests and is null on broadcasts, where clients keep what they had (see ADR-016).
+  myVotes: string[] | null;
+};
+
+// An interaction with part of a message, sent to POST /api/messages/:id/actions.
+export type MessageAction = { action: "poll.vote"; optionIds: string[] } | { action: "poll.close" };
+
 // The original of a forwarded message, shown as a quoted card. It is live: edits to the original show up
 // here, and a deleted original leaves only `deleted`. The card is seen by people who may not be able to see
 // the original conversation, so only public channels are named.
@@ -41,6 +63,8 @@ export type ChatForward = {
   editedAt: string | null;
   deleted: boolean;
   attachments: ChatAttachment[];
+  // Results only: voting happens in the original conversation.
+  poll: ChatPoll | null;
 };
 
 export type ChatMessage = {
@@ -60,6 +84,7 @@ export type ChatMessage = {
   attachments: ChatAttachment[];
   linkPreviews: ChatLinkPreview[];
   forwarded: ChatForward | null;
+  poll: ChatPoll | null;
 };
 
 export type MessagePage = { messages: ChatMessage[]; nextCursor: string | null };

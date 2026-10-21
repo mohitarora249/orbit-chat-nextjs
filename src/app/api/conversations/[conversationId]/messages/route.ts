@@ -4,6 +4,8 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { accessErrors, assertNotArchived, getConversationAccess, requireMessageAccess } from "@/lib/access";
 import { cursorWhere, decodeCursor, encodeCursor, messageSelect, parseLimit, serializeMessage, syncMessageLinks } from "@/lib/messages";
+import { createPoll, pollInputSchema, withMyVotes } from "@/lib/polls";
+import { POLL_QUESTION_MAX } from "@/lib/commands";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
 import { HttpError, jsonError, parseJson, routeError } from "@/lib/http";
@@ -20,8 +22,12 @@ const createMessageSchema = z.object({
   parentId: z.string().min(1).optional(),
   attachmentIds: z.array(z.string().min(1)).max(10).default([]),
   // Forwards (shares) this message into the conversation; `body` is then an optional comment.
-  forwardedMessageId: z.string().min(1).max(64).optional()
-}).refine(input => input.body.length > 0 || input.attachmentIds.length > 0 || input.forwardedMessageId, "A message needs text or an attachment.");
+  forwardedMessageId: z.string().min(1).max(64).optional(),
+  // Makes the message a poll; `body` is then its question.
+  poll: pollInputSchema.optional()
+}).refine(input => input.body.length > 0 || input.attachmentIds.length > 0 || input.forwardedMessageId, "A message needs text or an attachment.")
+  .refine(input => !input.poll || (input.body.length > 0 && input.body.length <= POLL_QUESTION_MAX), `A poll needs a question of up to ${POLL_QUESTION_MAX} characters.`)
+  .refine(input => !input.poll || (!input.attachmentIds.length && !input.forwardedMessageId), "A poll can't have attachments or forward a message.");
 
 type Context = { params: Promise<{ conversationId: string }> };
 
@@ -57,7 +63,7 @@ export async function GET(request: NextRequest, context: Context) {
     });
     const items = page.slice(0, limit);
     const body: MessagePage = {
-      messages: items.reverse().map(serializeMessage),
+      messages: await withMyVotes(user.id, items.reverse().map(serializeMessage)),
       nextCursor: page.length > limit ? encodeCursor(items[0]) : null
     };
     return NextResponse.json(body);
@@ -108,7 +114,7 @@ export async function POST(request: NextRequest, context: Context) {
     const { user, error } = await requireUser(request);
     if (error) return error;
     const { conversationId } = await context.params;
-    const { body, clientMessageId, parentId, attachmentIds, forwardedMessageId } = await parseJson(request, createMessageSchema);
+    const { body, clientMessageId, parentId, attachmentIds, forwardedMessageId, poll } = await parseJson(request, createMessageSchema);
 
     const access = await getConversationAccess(user.id, conversationId);
     if (access !== "ok") return jsonError(accessErrors[access].error, accessErrors[access].status);
@@ -146,6 +152,7 @@ export async function POST(request: NextRequest, context: Context) {
         if (parentId) {
           await tx.message.update({ where: { id: parentId }, data: { replyCount: { increment: 1 }, lastReplyAt: message.createdAt } });
         }
+        if (poll) await createPoll(tx, message.id, poll);
         await enqueue(tx, "message.created", { messageId: message.id });
         await syncMessageLinks(tx, message.id, body);
         return message.id;

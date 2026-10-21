@@ -8,6 +8,7 @@ import { Dialog, Popover } from "@/components/ui/overlay";
 import { dayLabel, timeLabel } from "@/components/chat/helpers";
 import { ForwardedCard, forwardSourceLabel } from "@/components/chat/message-item";
 import { api } from "@/lib/api";
+import { POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_MAX, POLL_QUESTION_MAX } from "@/lib/commands";
 import { mentionsToText } from "@/lib/mentions";
 import { ACCENTS, useTheme, type ThemeMode } from "@/lib/theme";
 import { cn, HIGHLIGHT_END, HIGHLIGHT_START } from "@/lib/utils";
@@ -201,6 +202,112 @@ export function CreateChannelDialog({ users, me, onCreated, onClose }: { users: 
   );
 }
 
+export type PollDraft = { question: string; options: string[]; multiSelect: boolean; anonymous: boolean; closesAt?: string };
+
+const POLL_DURATIONS: { label: string; ms: number | null }[] = [
+  { label: "Never", ms: null },
+  { label: "In 1 hour", ms: 60 * 60 * 1000 },
+  { label: "In 1 day", ms: 24 * 60 * 60 * 1000 },
+  { label: "In 3 days", ms: 3 * 24 * 60 * 60 * 1000 },
+  { label: "In 1 week", ms: 7 * 24 * 60 * 60 * 1000 }
+];
+
+// Opened by /poll, prefilled from its arguments. `onCreate` posts the poll and throws to show an error.
+export function CreatePollDialog({ initial, onCreate, onClose }: {
+  initial: Pick<PollDraft, "question" | "options">;
+  onCreate: (poll: PollDraft) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [question, setQuestion] = useState(initial.question.slice(0, POLL_QUESTION_MAX));
+  const [options, setOptions] = useState(() => {
+    const given = initial.options.map(option => option.slice(0, POLL_OPTION_MAX));
+    return given.length >= POLL_MIN_OPTIONS ? given : [...given, ...Array<string>(POLL_MIN_OPTIONS - given.length).fill("")];
+  });
+  const [multiSelect, setMultiSelect] = useState(false);
+  const [anonymous, setAnonymous] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+  // With the question given, start at the first empty option; otherwise at the question.
+  const [focusIndex, setFocusIndex] = useState<number | null>(() => initial.question ? options.findIndex(option => !option) : null);
+
+  const filled = options.map(option => option.trim()).filter(Boolean);
+  const duplicate = new Set(filled.map(option => option.toLowerCase())).size !== filled.length;
+
+  function addOption() {
+    if (options.length >= POLL_MAX_OPTIONS) return;
+    setOptions(current => [...current, ""]);
+    setFocusIndex(options.length);
+  }
+
+  // Enter in the last option adds another, like a list.
+  function onOptionKey(event: KeyboardEvent<HTMLInputElement>, index: number) {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing || index !== options.length - 1 || options.length >= POLL_MAX_OPTIONS) return;
+    event.preventDefault();
+    addOption();
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (duplicate) { setError("Each option must be different."); return; }
+    setPending(true);
+    setError("");
+    const ms = POLL_DURATIONS[duration].ms;
+    try {
+      await onCreate({ question: question.trim(), options: filled, multiSelect, anonymous, closesAt: ms ? new Date(Date.now() + ms).toISOString() : undefined });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not post the poll.");
+      setPending(false);
+    }
+  }
+
+  const field = "w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brand-300 focus:ring-4 focus:ring-brand-100/60";
+  const toggle = "flex cursor-pointer items-center gap-2.5 text-[13px] text-zinc-700";
+  return (
+    <Dialog title="Create a poll" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4 p-5">
+        <label className="block text-[13px] font-medium text-zinc-700">Question
+          <input autoFocus={!initial.question} required maxLength={POLL_QUESTION_MAX} value={question} onChange={event => setQuestion(event.target.value)} placeholder="What should we ask?" className={cn(field, "mt-1.5")}/>
+        </label>
+        <fieldset>
+          <legend className="text-[13px] font-medium text-zinc-700">Options</legend>
+          <div className="mt-1.5 space-y-1.5">
+            {options.map((option, index) => (
+              <div key={index} className="flex items-center gap-1.5">
+                <input value={option} maxLength={POLL_OPTION_MAX} aria-label={`Option ${index + 1}`} placeholder={`Option ${index + 1}`}
+                  autoFocus={focusIndex === index}
+                  onChange={event => setOptions(current => current.map((value, i) => i === index ? event.target.value : value))}
+                  onKeyDown={event => onOptionKey(event, index)} className={field}/>
+                {options.length > POLL_MIN_OPTIONS && (
+                  <button type="button" aria-label={`Remove option ${index + 1}`} onClick={() => { setOptions(current => current.filter((_, i) => i !== index)); setFocusIndex(null); }}
+                    className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"><X size={14}/></button>
+                )}
+              </div>
+            ))}
+          </div>
+          {options.length < POLL_MAX_OPTIONS && (
+            <button type="button" onClick={addOption} className="mt-1.5 flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium text-brand-600 transition hover:bg-brand-50"><Plus size={13}/>Add option</button>
+          )}
+        </fieldset>
+        <div className="space-y-2.5 rounded-lg border border-zinc-200 p-3">
+          <label className={toggle}><input type="checkbox" checked={multiSelect} onChange={event => setMultiSelect(event.target.checked)} className="accent-brand-600"/>Let people choose more than one option</label>
+          <label className={toggle}><input type="checkbox" checked={anonymous} onChange={event => setAnonymous(event.target.checked)} className="accent-brand-600"/>Anonymous: hide who voted for what</label>
+          <label className={toggle}>Close the poll
+            <select value={duration} onChange={event => setDuration(Number(event.target.value))} className="ml-auto rounded-md border border-zinc-200 bg-card px-2 py-1 text-xs outline-none focus:border-brand-300">
+              {POLL_DURATIONS.map((option, index) => <option key={option.label} value={index}>{option.label}</option>)}
+            </select>
+          </label>
+        </div>
+        {error && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</p>}
+        <div className="flex justify-end gap-2 pt-1">
+          <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button type="submit" disabled={pending || !question.trim() || filled.length < POLL_MIN_OPTIONS}>{pending ? "Posting…" : "Post poll"}</Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
 // A channel, or a person (whose DM may not exist yet).
 export type ForwardTarget = { kind: "conversation"; id: string } | { kind: "person"; userId: string };
 const MAX_FORWARD_TARGETS = 10;
@@ -219,7 +326,9 @@ function quotedForward(message: ChatMessage, conversation: ConversationSummary |
     createdAt: message.createdAt,
     editedAt: message.editedAt,
     deleted: false,
-    attachments: message.attachments
+    attachments: message.attachments,
+    // Forwarded copies show results without who voted, as the server does.
+    poll: message.poll && { ...message.poll, myVotes: null, options: message.poll.options.map(option => ({ ...option, userIds: [] })) }
   };
 }
 
@@ -317,7 +426,7 @@ export function ForwardDialog({ message, conversations, users, me, usersById, la
             onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); } }}
             className="mt-1.5 w-full resize-y rounded-lg border border-zinc-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brand-300 focus:ring-4 focus:ring-brand-100/60"/>
         </label>
-        <ForwardedCard forward={quoted} usersById={usersById} meId={me.id}/>
+        <ForwardedCard forward={quoted} usersById={usersById} me={me}/>
         {leavesPrivate && (
           <p className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-4 text-amber-800">
             <ShieldAlert size={14} className="mt-px shrink-0"/>This message is from {forwardSourceLabel(quoted)}. Everyone where you forward it will be able to read it and open its files.
@@ -348,7 +457,8 @@ const COMMANDS: [string, string][] = [
   // ["/giphy cats", "Pick a GIF to post (Send, Shuffle or Cancel)"],
   ["/remind me to stretch in 20 minutes", "Also \"at 3pm\", \"tomorrow at 9am\", \"on friday\""],
   ["/remind list", "Open your reminders (also under Reminders in the sidebar)"],
-  ["/status 🌴 On vacation", "Set your status; /status clear removes it"]
+  ["/status 🌴 On vacation", "Set your status; /status clear removes it"],
+  ["/poll", "Create a poll: one or several choices, anonymous, closing time"]
 ];
 
 export function HelpDialog({ onClose }: { onClose: () => void }) {

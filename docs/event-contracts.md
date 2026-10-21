@@ -32,13 +32,13 @@ reconnect if still idle). A user is `away` when all of their sockets are idle, `
 
 All message payloads use the `ChatMessage` shape from `src/lib/types.ts`: author, reactions, attachments,
 link previews, thread fields, `editedAt`, `deletedAt` (a deleted message has an empty body and no reactions,
-attachments, link previews or forward), and `forwarded` (the quoted original of a forward, with `deleted: true` once it is gone). `linkPreviews` is usually empty in `message:new` and filled in by a later `message:updated`.
+attachments, link previews, forward or poll), `poll` (tallies; voter ids only in named polls; `myVotes` is always `null` on events, see ADR-016), and `forwarded` (the quoted original of a forward, with `deleted: true` once it is gone). `linkPreviews` is usually empty in `message:new` and filled in by a later `message:updated`.
 
 | Event | Payload | Sent when |
 |---|---|---|
 | `session:ready` | none | After the server has joined the socket's rooms |
 | `message:new` | `ChatMessage` | A message or thread reply was created |
-| `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, a thread got a reply, an attachment scan finished, its link previews were fetched, or the original it forwards changed |
+| `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, someone voted in its poll or the poll closed, a thread got a reply, an attachment scan finished, its link previews were fetched, or the original it forwards changed |
 | `conversation:created` | `ConversationSummary` | A channel or DM that the user can see was created, or the user was added to a private channel. `isMember` is set for each recipient (members and everyone else get separate emits) |
 | `conversation:updated` | `ConversationDetails` (`{ id, name, topic, description, archivedAt, memberIds, memberCount }`) | A channel was renamed, its topic or description changed, it was archived or unarchived, or its members changed. Sent to the conversation's room; merge it into the summary |
 | `conversation:membership` | `{ conversationId, isMember }` | The same user joined, left, was added to or was removed from a public channel (sent to the user's own room only) |
@@ -49,6 +49,7 @@ attachments, link previews or forward), and `forwarded` (the quoted original of 
 | `status:update` | `{ userId, status }` (`UserStatus` or `null`) | A user changed their custom status or Do Not Disturb (via the outbox). Expiry is not announced: clients hide statuses past `expiresAt` / `dndUntil` |
 | `draft:update` | `{ conversationId, draft }` (`{ body, updatedAt }` or `null`) | The same user's unsent text in a conversation changed or was cleared (keeps tabs in sync; never sent to anyone else). Carries the draft as stored when sent, so it may already be newer than the save that caused it |
 | `reminder:update` | `{ reminderId, reminder }` (`ChatReminder` or `null`) | One of the same user's reminders was set, went off (`firedAt` set), was snoozed (`firedAt` null) or was marked done (`null`). Never sent to anyone else; carries the reminder as stored when sent |
+| `poll:votes` | `{ messageId, pollId, optionIds }` | The same user's choices in a poll changed (keeps tabs in sync, including in anonymous polls; never sent to anyone else). Carries the choices as stored when sent |
 | `pins:update` | `{ conversationIds }` (full list, in pin order) | The same user pinned or unpinned a channel or DM (keeps tabs in sync; never sent to anyone else) |
 | `typing` | `{ conversationId, parentId, userId, displayName, typing }` | Another user is typing |
 | `chat:error` | `{ message }` | Room setup failed |

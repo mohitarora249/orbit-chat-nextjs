@@ -9,6 +9,7 @@ import { auth } from "./src/lib/auth";
 import { visibleConversationsWhere } from "./src/lib/access";
 import { startOutboxWorker } from "./src/lib/outbox-worker";
 import { startReminderClock } from "./src/lib/reminders";
+import { startPollClock } from "./src/lib/polls";
 import { ensureBucket, storageConfigured } from "./src/lib/storage";
 import type { Presence } from "./src/lib/presence";
 
@@ -171,6 +172,7 @@ async function start() {
   }
   const stopWorker = startOutboxWorker(io);
   const stopReminders = startReminderClock();
+  const stopPolls = startPollClock();
 
   httpServer.listen(port, hostname, () => {
     console.log(`> Orbit Chat ready on http://${hostname}:${port}`);
@@ -183,6 +185,7 @@ async function start() {
     console.log("Shutting down...");
     stopWorker();
     stopReminders();
+    stopPolls();
     // io.close() disconnects all sockets and also closes the underlying HTTP server.
     await io.close();
     await Promise.allSettled(redisClients.map(client => client.quit()));

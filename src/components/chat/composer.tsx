@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardEvent, DragEvent, Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { AlarmClock, ArrowUp, AtSign, ImagePlay, Loader2, Megaphone, Paperclip, Shuffle, Smile, X } from "lucide-react";
+import { AlarmClock, ArrowUp, AtSign, BarChart3, ImagePlay, Loader2, Megaphone, Paperclip, Shuffle, Smile, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
@@ -39,10 +39,10 @@ const BROADCASTS: { kind: BroadcastMention; hint: string }[] = [
   { kind: "here", hint: "Notify everyone online right now" }
 ];
 
-type CommandSuggestion = { kind: "command"; name: SlashCommandName; usage: string; hint: string };
+type CommandSuggestion = { kind: "command"; name: SlashCommandName; usage: string; hint: string; immediate?: boolean };
 type Suggestion = { kind: "user"; user: ChatUser } | { kind: BroadcastMention; hint: string } | CommandSuggestion;
 
-const COMMAND_ICONS: Record<SlashCommandName, React.ReactNode> = { giphy: <ImagePlay size={13}/>, remind: <AlarmClock size={13}/>, status: <Smile size={13}/> };
+const COMMAND_ICONS: Record<SlashCommandName, React.ReactNode> = { giphy: <ImagePlay size={13}/>, poll: <BarChart3 size={13}/>, remind: <AlarmClock size={13}/>, status: <Smile size={13}/> };
 
 const suggestionGroup = (suggestion: Suggestion) => suggestion.kind === "user" ? "People" : suggestion.kind === "command" ? "Commands" : "Notify";
 
@@ -72,7 +72,7 @@ export type ComposerProps = {
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
   // ↑ in an empty composer: start editing the user's last message here. Returns false if there is none.
   onEditLast?: () => boolean;
-  // Runs /remind and /status; /giphy is handled here. Resolves true once done, which clears the text.
+  // Runs /poll, /remind and /status; /giphy is handled here. Resolves true once done, which clears the text.
   // Without it, text starting with "/" is sent as a message.
   onCommand?: (name: Exclude<SlashCommandName, "giphy">, args: string) => Promise<boolean>;
   // Called with this composer's own conversation and thread, so a "stopped" sent on unmount reaches the
@@ -265,8 +265,9 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
       if (done) clearDraft();
     } finally {
       setSending(false);
-      // A GIF preview takes focus (its Send button), so Enter sends it and Esc cancels.
-      if (!(done && known.name === "giphy")) textareaRef.current?.focus();
+      // A GIF preview takes focus (its Send button), so Enter sends it and Esc cancels; the poll dialog
+      // focuses its own first field.
+      if (!(done && (known.name === "giphy" || known.name === "poll"))) textareaRef.current?.focus();
     }
   }
 
@@ -326,6 +327,7 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
 
   function pickSuggestion(suggestion: Suggestion) {
     if (suggestion.kind !== "command") { pickMention(suggestion); return; }
+    if (suggestion.immediate) { void runCommand(suggestion.name, ""); return; }
     const next = `/${suggestion.name} `;
     setDraft(next);
     pendingCaretRef.current = next.length;

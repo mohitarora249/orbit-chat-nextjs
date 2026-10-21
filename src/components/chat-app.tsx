@@ -12,19 +12,19 @@ import { Button } from "@/components/ui/button";
 import { Composer } from "@/components/chat/composer";
 import { MessageItem } from "@/components/chat/message-item";
 import { ActivityPanel, PeoplePanel, RemindersPanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
-import { CommandPalette, CreateChannelDialog, ForwardDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type ForwardTarget, type NotificationPrefs } from "@/components/chat/dialogs";
+import { CommandPalette, CreateChannelDialog, CreatePollDialog, ForwardDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type ForwardTarget, type NotificationPrefs, type PollDraft } from "@/components/chat/dialogs";
 import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
 import { BrowseChannelsDialog, ChannelDetailsDialog, channelPermissions, type ChannelTab } from "@/components/chat/channels";
-import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mergeMessages, timeLabel, upsertMessage } from "@/components/chat/helpers";
+import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, keepMyVotes, mergeMessages, myPollVotes, timeLabel, upsertMessage, withVote } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
-import { parseReminder, parseStatus, reminderTimeLabel } from "@/lib/commands";
+import { parsePollArgs, parseReminder, parseStatus, reminderTimeLabel, type SlashCommandName } from "@/lib/commands";
 import { isGifUrl } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets } from "@/lib/mentions";
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
-import type { ActivityItem, Bootstrap, ChannelMember, ChatAttachment, ChatForward, ChatMessage, ChatReminder, ChatUser, ConversationDetails, ConversationSummary, Draft, MessagePage, SearchHit } from "@/lib/types";
+import type { ActivityItem, Bootstrap, ChannelMember, ChatAttachment, ChatForward, ChatMessage, ChatReminder, ChatUser, ConversationDetails, ConversationSummary, Draft, MessageAction, MessagePage, SearchHit } from "@/lib/types";
 
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
@@ -88,6 +88,8 @@ export function ChatApp() {
   // Unsent composer text by conversation id (personal, synced to the server).
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [dialog, setDialog] = useState<"palette" | "create" | "help" | "browse" | "details" | null>(null);
+  // A poll being written, opened by /poll in the conversation (or thread) it will be posted to.
+  const [pollDraft, setPollDraft] = useState<{ conversationId: string; parentId: string | null; question: string; options: string[] } | null>(null);
   const [detailsTab, setDetailsTab] = useState<ChannelTab>("about");
   const [menu, setMenu] = useState<"workspace" | "notifications" | "status" | null>(null);
   // Other people's presence; ours is derived from the socket and `idle`.
@@ -129,7 +131,7 @@ export function ChatApp() {
   const remindersRef = useRef(reminders);
   bootstrapRef.current = bootstrap;
   remindersRef.current = reminders;
-  overlayOpenRef.current = dialog !== null || menu !== null || forwarding !== null;
+  overlayOpenRef.current = dialog !== null || menu !== null || forwarding !== null || pollDraft !== null;
   prefsRef.current = prefs;
   idleRef.current = idle;
   threadIdRef.current = thread?.parentId ?? null;
@@ -376,11 +378,11 @@ export function ChatApp() {
   const applyUpdated = useCallback((message: ChatMessage) => {
     // A deleted message with no thread disappears, matching what the history API returns.
     const remove = Boolean(message.deletedAt) && message.replyCount === 0;
-    const apply = (list: ChatMessage[]) => remove ? list.filter(item => item.id !== message.id) : list.map(item => item.id === message.id ? message : item);
+    const apply = (list: ChatMessage[]) => remove ? list.filter(item => item.id !== message.id) : list.map(item => item.id === message.id ? keepMyVotes(item, message) : item);
     if (!message.parentId) setHistory(current => ({ ...current, messages: apply(current.messages) }));
     setThread(current => {
       if (!current) return current;
-      if (current.parentId === message.id) return { ...current, parent: message };
+      if (current.parentId === message.id) return { ...current, parent: current.parent ? keepMyVotes(current.parent, message) : message };
       return message.parentId === current.parentId ? { ...current, replies: apply(current.replies) } : current;
     });
   }, []);
@@ -535,6 +537,8 @@ export function ChatApp() {
       setReminders(current => upsertReminder(current, reminderId, reminder));
       if (justFired && reminder) alertReminder(reminder);
     });
+    // Our vote changed in another tab. Anonymous polls only tell each voter their own choices this way.
+    socket.on("poll:votes", ({ messageId, optionIds }: { messageId: string; pollId: string; optionIds: string[] }) => setMyVotes(messageId, optionIds));
     socket.on("typing", (event: { conversationId: string; parentId: string | null; userId: string; displayName: string; typing: boolean }) => {
       if (event.userId === meId) return;
       const key = typingKey(event.conversationId, event.parentId);
@@ -620,7 +624,7 @@ export function ChatApp() {
     const optimistic: ChatMessage = {
       id: `optimistic-${clientMessageId}`, conversationId, authorId: state.me.id, clientMessageId, body, parentId,
       replyCount: 0, lastReplyAt: null, createdAt: new Date().toISOString(), editedAt: null, deletedAt: null,
-      author: { id: state.me.id, displayName: state.me.displayName, avatarColor: state.me.avatarColor }, reactions: [], attachments, linkPreviews: [], forwarded: null
+      author: { id: state.me.id, displayName: state.me.displayName, avatarColor: state.me.avatarColor }, reactions: [], attachments, linkPreviews: [], forwarded: null, poll: null
     };
     const place = (message: ChatMessage) => {
       if (parentId) setThread(current => current?.parentId === parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
@@ -661,6 +665,41 @@ export function ChatApp() {
       setNotice(error instanceof Error ? error.message : "Could not update reaction.");
     }
   }, [applyUpdated]);
+
+  // Sets the viewer's poll choices on a loaded message (main list or thread), keeping its tallies.
+  const setMyVotes = useCallback((messageId: string, optionIds: string[]) => {
+    const update = (message: ChatMessage) => message.id === messageId && message.poll ? { ...message, poll: { ...message.poll, myVotes: optionIds } } : message;
+    setHistory(current => ({ ...current, messages: current.messages.map(update) }));
+    setThread(current => current && { ...current, parent: current.parent && update(current.parent), replies: current.replies.map(update) });
+  }, []);
+
+  const onAction = useCallback(async (message: ChatMessage, action: MessageAction) => {
+    const myId = bootstrapRef.current?.me.id;
+    if (!myId || !message.poll) return;
+    // Votes show at once; the response carries the canonical tallies and our choices.
+    if (action.action === "poll.vote") applyUpdated({ ...message, poll: withVote(message.poll, myId, action.optionIds) });
+    try {
+      const result = await api<{ message: ChatMessage }>(`/api/messages/${message.id}/actions`, { method: "POST", json: action });
+      applyUpdated(result.message);
+    } catch (error) {
+      applyUpdated({ ...message, poll: { ...message.poll, myVotes: myPollVotes(message.poll, myId) } });
+      setNotice(error instanceof Error ? error.message : "Could not update the poll.");
+    }
+  }, [applyUpdated]);
+
+  // Posts the poll from the /poll dialog. Throws so the dialog can show what went wrong.
+  async function sendPoll(draft: PollDraft) {
+    if (!pollDraft) return;
+    const { conversationId, parentId } = pollDraft;
+    const { question, ...poll } = draft;
+    const { message } = await api<{ message: ChatMessage }>(`/api/conversations/${conversationId}/messages`, {
+      method: "POST",
+      json: { body: question, clientMessageId: crypto.randomUUID(), parentId: parentId ?? undefined, poll }
+    });
+    if (parentId) setThread(current => current?.parentId === parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
+    else if (activeIdRef.current === conversationId) setHistory(current => ({ ...current, messages: upsertMessage(current.messages, message) }));
+    setPollDraft(null);
+  }
 
   async function togglePin(conversationId: string) {
     const pin = !pinnedIds.includes(conversationId);
@@ -882,8 +921,13 @@ export function ChatApp() {
     try { if (me) localStorage.setItem(`orbit-chat-notify:${me.id}`, JSON.stringify(next)); } catch { /* storage unavailable */ }
   }
 
-  // /remind and /status from a composer in `conversationId`. Resolves true when done, which clears the composer.
-  async function runCommand(conversationId: string, name: "remind" | "status", args: string) {
+  // /poll, /remind and /status from a composer in `conversationId` (and thread `parentId`). Resolves true when
+  // done, which clears the composer.
+  async function runCommand(conversationId: string, parentId: string | null, name: Exclude<SlashCommandName, "giphy">, args: string) {
+    if (name === "poll") {
+      setPollDraft({ conversationId, parentId, ...parsePollArgs(args) });
+      return true;
+    }
     if (name === "status") {
       const parsed = parseStatus(args);
       if (parsed.kind === "open") {
@@ -1104,7 +1148,7 @@ export function ChatApp() {
         {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
         <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
           highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
-          replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} openForwarded={openForwarded}
+          replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} onAction={onAction} openForwarded={openForwarded}
           editRequested={editRequest?.where === "main" && editRequest.id === message.id} onEditRequestHandled={clearEditRequest}/>
         {seenId === message.id && (
           <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
@@ -1327,7 +1371,7 @@ export function ChatApp() {
                 typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={emitTyping} onNotice={setNotice}
                 savedDraft={drafts[activeConversation.id]?.body} onDraftChange={body => saveDraft(activeConversation.id, body)}
                 onSend={(body, attachments) => sendMessage(activeConversation.id, null, body, attachments)}
-                onEditLast={editLastMessage} onCommand={(name, args) => runCommand(activeConversation.id, name, args)}/>
+                onEditLast={editLastMessage} onCommand={(name, args) => runCommand(activeConversation.id, null, name, args)}/>
             )}
           </div>
         </div>
@@ -1339,9 +1383,9 @@ export function ChatApp() {
           typingText={typingText(thread.parent?.conversationId ?? activeId ?? "", thread.parentId)} highlightId={highlightId} mentionable={mentionable}
           broadcastMentions={activeConversation?.type === "CHANNEL"} readOnlyNotice={archivedNotice ?? (activeChannel && !activeChannel.isMember ? `Join #${activeChannel.name} to reply.` : null)} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
           onSend={(body, attachments) => sendMessage(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, body, attachments)}
-          onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} openForwarded={openForwarded}
+          onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} onAction={onAction} openForwarded={openForwarded}
           editRequestId={editRequest?.where === "thread" ? editRequest.id : null} onEditRequestHandled={clearEditRequest} onEditLast={editLastReply}
-          onCommand={(name, args) => runCommand(thread.parent?.conversationId ?? activeId ?? "", name, args)}/>
+          onCommand={(name, args) => runCommand(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, name, args)}/>
       )}
       {rightPanel === "activity" && (
         <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>
@@ -1411,6 +1455,7 @@ export function ChatApp() {
           presenceOf={presenceOf} initialTab={detailsTab} onDetails={applyDetails} onJoin={() => joinChannel(activeChannel.id)} onLeave={() => leaveChannel(activeChannel)}
           onOpenDm={userId => { setDialog(null); void openDm(userId); }} onNotice={setNotice} onClose={() => setDialog(null)}/>
       )}
+      {pollDraft && <CreatePollDialog initial={pollDraft} onCreate={sendPoll} onClose={() => setPollDraft(null)}/>}
       {forwarding && (
         <ForwardDialog message={forwarding} conversations={bootstrap.conversations} users={bootstrap.users} me={me} usersById={usersById} label={label}
           onForward={(targets, comment) => forwardMessage(forwarding, targets, comment)} onClose={() => setForwarding(null)}/>

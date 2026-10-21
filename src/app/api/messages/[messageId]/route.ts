@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { ARCHIVED_ERROR, isWorkspaceAdmin, requireMessageAccess } from "@/lib/access";
 import { messageSelect, serializeMessage, syncMessageLinks } from "@/lib/messages";
+import { POLL_QUESTION_MAX } from "@/lib/commands";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
 import { HttpError, jsonError, parseJson, routeError } from "@/lib/http";
@@ -30,7 +31,10 @@ export async function PATCH(request: NextRequest, context: Context) {
     if (message.authorId !== user.id) return jsonError("You can only edit your own messages.", 403);
     if (message.conversation.archivedAt) return jsonError(ARCHIVED_ERROR, 403);
     const { body } = await parseJson(request, editSchema);
-    if (!body && !message.forwardedFromId && !(await prisma.attachment.count({ where: { messageId: message.id } }))) {
+    // The question of a poll can be reworded; its options cannot change.
+    if (await prisma.poll.count({ where: { messageId: message.id } })) {
+      if (!body || body.length > POLL_QUESTION_MAX) return jsonError(`A poll needs a question of up to ${POLL_QUESTION_MAX} characters.`, 400);
+    } else if (!body && !message.forwardedFromId && !(await prisma.attachment.count({ where: { messageId: message.id } }))) {
       return jsonError("A message needs text or an attachment.", 400);
     }
 

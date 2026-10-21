@@ -3,11 +3,13 @@
 
 import { STATUS_TEXT_MAX } from "./presence";
 
-export type SlashCommandName = "giphy" | "remind" | "status";
+export type SlashCommandName = "giphy" | "poll" | "remind" | "status";
 
-export const SLASH_COMMANDS: { name: SlashCommandName; usage: string; hint: string }[] = [
+// `immediate` commands take no arguments: picking one from the suggestions runs it.
+export const SLASH_COMMANDS: { name: SlashCommandName; usage: string; hint: string; immediate?: boolean }[] = [
   // /giphy is turned off for now. Uncomment to bring it back (and set GIPHY_API_KEY).
   // { name: "giphy", usage: "/giphy [search]", hint: "Post a GIF" },
+  { name: "poll", usage: "/poll", hint: "Create a poll", immediate: true },
   { name: "remind", usage: "/remind me [what] [when]", hint: "Set a reminder for yourself; /remind list shows them" },
   { name: "status", usage: "/status [emoji] [text]", hint: "Set your status, or \"clear\"" }
 ];
@@ -126,6 +128,25 @@ export function reminderTimeLabel(at: Date, now = new Date()) {
   if (days === 0) return `at ${time}`;
   if (days === 1) return `tomorrow at ${time}`;
   return `on ${new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(at)} at ${time}`;
+}
+
+// ---- /poll ---------------------------------------------------------------------------------------------------
+
+export const POLL_QUESTION_MAX = 300;
+export const POLL_OPTION_MAX = 100;
+export const POLL_MIN_OPTIONS = 2;
+export const POLL_MAX_OPTIONS = 10;
+// Like reminders, a poll can be set to close at most a year ahead.
+export const POLL_MAX_OPEN_MS = REMINDER_MAX_AHEAD_MS;
+
+// /poll opens the poll dialog. Text typed after it still prefills the dialog:
+// '/poll "Lunch?" "Pizza" "Tacos"' -> { question: "Lunch?", options: ["Pizza", "Tacos"] }. Curly quotes count
+// too (phones type them). Without quotes the whole text is the question. It does not validate.
+export function parsePollArgs(args: string): { question: string; options: string[] } {
+  const quoted = [...args.matchAll(/["“”]([^"“”]*)["“”]/g)].map(match => match[1].trim()).filter(Boolean);
+  if (!quoted.length) return { question: args.trim(), options: [] };
+  const [question, ...options] = quoted;
+  return { question, options: options.slice(0, POLL_MAX_OPTIONS) };
 }
 
 // ---- /status -------------------------------------------------------------------------------------------------

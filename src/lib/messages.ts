@@ -2,12 +2,26 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { extractLinks } from "./links";
 import { enqueue } from "./outbox";
-import type { ChatForward, ChatLinkPreview, ChatMessage, ReactionSummary } from "./types";
+import type { ChatForward, ChatLinkPreview, ChatMessage, ChatPoll, ReactionSummary } from "./types";
 
 const attachmentSelect = {
   select: { id: true, fileName: true, contentType: true, size: true, status: true },
   orderBy: [{ createdAt: "asc" }, { id: "asc" }]
 } satisfies Prisma.Message$attachmentsArgs;
+
+const pollSelect = {
+  select: {
+    id: true,
+    multiSelect: true,
+    anonymous: true,
+    closesAt: true,
+    closedAt: true,
+    options: {
+      select: { id: true, label: true, votes: { select: { userId: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] } },
+      orderBy: { position: "asc" }
+    }
+  }
+} satisfies Prisma.Message$pollArgs;
 
 // The public message shape. Anything sent to clients (API or socket) must go through this select.
 export const messageSelect = {
@@ -25,6 +39,7 @@ export const messageSelect = {
   author: { select: { id: true, displayName: true, avatarColor: true } },
   reactions: { select: { emoji: true, userId: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
   attachments: attachmentSelect,
+  poll: pollSelect,
   links: {
     select: { url: true, preview: { select: { status: true, title: true, description: true, siteName: true, imageUrl: true } } },
     orderBy: { position: "asc" }
@@ -40,7 +55,8 @@ export const messageSelect = {
       deletedAt: true,
       conversation: { select: { type: true, isPrivate: true, name: true } },
       author: { select: { id: true, displayName: true, avatarColor: true } },
-      attachments: attachmentSelect
+      attachments: attachmentSelect,
+      poll: pollSelect
     }
   }
 } satisfies Prisma.MessageSelect;
@@ -58,6 +74,27 @@ function linkPreviews(links: SelectedMessage["links"]): ChatLinkPreview[] {
   return links.flatMap(({ url, preview: { status, ...preview } }) => status === "OK" ? [{ url, ...preview }] : []);
 }
 
+// Voter ids are left out of anonymous polls, and of forwarded copies, which people who cannot see the
+// original conversation may read.
+function serializePoll(poll: NonNullable<SelectedMessage["poll"]>, showVoters: boolean): ChatPoll {
+  const voters = new Set(poll.options.flatMap(option => option.votes.map(vote => vote.userId)));
+  return {
+    id: poll.id,
+    multiSelect: poll.multiSelect,
+    anonymous: poll.anonymous,
+    closesAt: poll.closesAt?.toISOString() ?? null,
+    closedAt: poll.closedAt?.toISOString() ?? null,
+    voterCount: voters.size,
+    options: poll.options.map(option => ({
+      id: option.id,
+      label: option.label,
+      votes: option.votes.length,
+      userIds: showVoters && !poll.anonymous ? option.votes.map(vote => vote.userId) : []
+    })),
+    myVotes: null
+  };
+}
+
 function serializeForward(original: NonNullable<SelectedMessage["forwardedFrom"]>): ChatForward {
   const deleted = original.deletedAt !== null;
   const { type, isPrivate, name } = original.conversation;
@@ -71,7 +108,8 @@ function serializeForward(original: NonNullable<SelectedMessage["forwardedFrom"]
     createdAt: original.createdAt.toISOString(),
     editedAt: original.editedAt?.toISOString() ?? null,
     deleted,
-    attachments: deleted ? [] : original.attachments
+    attachments: deleted ? [] : original.attachments,
+    poll: deleted || !original.poll ? null : serializePoll(original.poll, false)
   };
 }
 
@@ -94,7 +132,8 @@ export function serializeMessage(message: SelectedMessage): ChatMessage {
     reactions: deleted ? [] : groupReactions(message.reactions),
     attachments: deleted ? [] : message.attachments,
     linkPreviews: deleted ? [] : linkPreviews(message.links),
-    forwarded: deleted || !message.forwardedFrom ? null : serializeForward(message.forwardedFrom)
+    forwarded: deleted || !message.forwardedFrom ? null : serializeForward(message.forwardedFrom),
+    poll: deleted || !message.poll ? null : serializePoll(message.poll, true)
   };
 }
 

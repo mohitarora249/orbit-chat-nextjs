@@ -60,6 +60,7 @@ model User {
   pinnedConversations PinnedConversation[]
   drafts              Draft[]
   reminders           Reminder[]
+  pollVotes           PollVote[]
 }
 
 // Better Auth tables.
@@ -194,6 +195,7 @@ model Message {
   reactions       Reaction[]
   attachments     Attachment[]
   links           MessageLink[]
+  poll            Poll?
 
   @@unique([authorId, clientMessageId])
   @@index([conversationId, createdAt, id])
@@ -332,4 +334,47 @@ model OutboxEvent {
   lastError   String?
 
   @@index([failedAt, availableAt, id])
+}
+
+// A poll is attached to an ordinary message, whose body is the question (so search and previews work as they
+// do for text). Options cannot change once the poll exists.
+model Poll {
+  id          String       @id @default(cuid())
+  messageId   String       @unique
+  multiSelect Boolean      @default(false)
+  // Votes are still stored per user (one vote per option each), but voter ids are never sent to clients.
+  anonymous   Boolean      @default(false)
+  closesAt    DateTime?
+  closedAt    DateTime?
+  createdAt   DateTime     @default(now())
+  message     Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  options     PollOption[]
+  votes       PollVote[]
+
+  @@index([closedAt, closesAt])
+}
+
+model PollOption {
+  id       String     @id @default(cuid())
+  pollId   String
+  position Int
+  label    String
+  poll     Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes    PollVote[]
+
+  @@unique([pollId, position])
+}
+
+model PollVote {
+  id        String     @id @default(cuid())
+  pollId    String
+  optionId  String
+  userId    String
+  createdAt DateTime   @default(now())
+  poll      Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  option    PollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([optionId, userId])
+  @@index([pollId, userId])
 }

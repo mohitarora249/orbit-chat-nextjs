@@ -4,11 +4,12 @@ import { Fragment, KeyboardEvent, memo, useEffect, useRef, useState } from "reac
 import { AlertTriangle, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
+import { PollCard } from "@/components/chat/poll";
 import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
 import { isGifUrl, parseLinks } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets, parseMentions } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
-import type { ChatAttachment, ChatForward, ChatLinkPreview, ChatMessage, ChatUser } from "@/lib/types";
+import type { ChatAttachment, ChatForward, ChatLinkPreview, ChatMessage, ChatUser, MessageAction } from "@/lib/types";
 
 const INLINE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -18,6 +19,8 @@ export type MessageActions = {
   onDelete: (message: ChatMessage) => void;
   onOpenThread?: (message: ChatMessage) => void;
   onForward: (message: ChatMessage) => void;
+  // Votes in or closes a poll.
+  onAction: (message: ChatMessage, action: MessageAction) => void;
   // Jumps to the original of a forwarded message; returns null if the viewer cannot see its conversation.
   openForwarded: (forward: ChatForward) => (() => void) | null;
   // Called when a message starts editing because `editRequested` was set, so the request is not repeated.
@@ -134,7 +137,7 @@ export function forwardSourceLabel(forward: Pick<ChatForward, "conversation">) {
 }
 
 // The quoted original of a forwarded message.
-export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: ChatForward; usersById: Map<string, ChatUser>; meId: string; onOpen?: (() => void) | null }) {
+export function ForwardedCard({ forward, usersById, me, onOpen }: { forward: ChatForward; usersById: Map<string, ChatUser>; me: ChatUser; onOpen?: (() => void) | null }) {
   const SourceIcon = forward.conversation.type === "DM" ? User : forward.conversation.isPrivate ? Lock : Hash;
   const source = forwardSourceLabel(forward);
   return (
@@ -150,10 +153,11 @@ export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: C
           {forward.body && isGifUrl(forward.body) && <div className="mt-1"><GifView url={forward.body}/></div>}
           {forward.body && !isGifUrl(forward.body) && (
             <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-800">
-              <MessageBody body={forward.body} usersById={usersById} meId={meId}/>
+              <MessageBody body={forward.body} usersById={usersById} meId={me.id}/>
               {forward.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(forward.editedAt)} at ${timeLabel(forward.editedAt)}`}>(edited)</span>}
             </p>
           )}
+          {forward.poll && <PollCard poll={forward.poll} me={me} usersById={usersById} interactive={false}/>}
           {forward.attachments.length > 0 && (
             <div className="mt-1.5 flex flex-col gap-2">{forward.attachments.map(attachment => <AttachmentView key={attachment.id} attachment={attachment}/>)}</div>
           )}
@@ -170,7 +174,7 @@ export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: C
   );
 }
 
-function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, editRequested, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded, onEditRequestHandled }: Props) {
+function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, editRequested, onReact, onEdit, onDelete, onOpenThread, onForward, onAction, openForwarded, onEditRequestHandled }: Props) {
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -266,8 +270,12 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
         {!deleted && message.forwarded && (
           <>
             {!message.body && <p className="flex items-center gap-1 text-xs text-zinc-400"><Forward size={12}/>Forwarded a message</p>}
-            <ForwardedCard forward={message.forwarded} usersById={usersById} meId={me.id} onOpen={openForwarded(message.forwarded)}/>
+            <ForwardedCard forward={message.forwarded} usersById={usersById} me={me} onOpen={openForwarded(message.forwarded)}/>
           </>
+        )}
+        {!deleted && message.poll && (
+          <PollCard poll={message.poll} me={me} usersById={usersById} interactive={!readOnly && !pending} canClose={mine || canModerate}
+            onVote={optionIds => onAction(message, { action: "poll.vote", optionIds })} onClosePoll={() => onAction(message, { action: "poll.close" })}/>
         )}
         {!deleted && !editing && message.linkPreviews.length > 0 && (
           <div className="mt-1.5 flex flex-col gap-2">{message.linkPreviews.map(preview => <LinkPreviewCard key={preview.url} preview={preview}/>)}</div>

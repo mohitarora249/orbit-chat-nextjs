@@ -108,6 +108,11 @@ function createHandlers(io: Server): Handlers {
       const reminder = await prisma.reminder.findUnique({ where: { id: reminderId }, select: reminderSelect });
       io.to(`user:${userId}`).emit("reminder:update", { reminderId, reminder: reminder && serializeReminder(reminder) });
     },
+    // The user's own choices, for their other tabs: anonymous polls never carry them on the message.
+    "poll.voted": async ({ userId, messageId }) => {
+      const poll = await prisma.poll.findUnique({ where: { messageId }, select: { id: true, votes: { where: { userId }, select: { optionId: true } } } });
+      if (poll) io.to(`user:${userId}`).emit("poll:votes", { messageId, pollId: poll.id, optionIds: poll.votes.map(vote => vote.optionId) });
+    },
     "user.status": async ({ userId }) => {
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { ...statusSelect, workspaceLinks: { select: { workspaceId: true } } } });
       if (!user) return;
@@ -131,6 +136,26 @@ function createHandlers(io: Server): Handlers {
       if (scanned.messageId) await emitUpdated(io, scanned.messageId);
     }
   };
+}
+
+// These handlers publish the current state, not the payload's, so a repeat of the same event in one batch
+// adds nothing: a busy poll queues a message.updated per vote, and only one of them needs to go out.
+const COALESCED = new Set<OutboxEventType>(["message.updated", "poll.voted"]);
+
+// Keeps the first of each repeated event and returns the ids of the rest, to delete unhandled.
+function coalesce(batch: ClaimedEvent[]) {
+  const seen = new Set<string>();
+  const keep: ClaimedEvent[] = [];
+  const repeats: bigint[] = [];
+  for (const event of batch) {
+    const key = COALESCED.has(event.type) ? `${event.type}:${JSON.stringify(event.payload)}` : null;
+    if (key && seen.has(key)) repeats.push(event.id);
+    else {
+      if (key) seen.add(key);
+      keep.push(event);
+    }
+  }
+  return { keep, repeats };
 }
 
 // Called when an event has failed MAX_ATTEMPTS times, so the user is not left waiting forever.
@@ -164,7 +189,7 @@ export function startOutboxWorker(io: Server) {
   const handlers = createHandlers(io);
   const lanes: Lane[] = [
     // Realtime fan-out is fast and ordering matters, so it runs one event at a time.
-    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.updated", "conversation.membership", "conversation.read", "user.status", "conversation.pins", "conversation.draft", "reminder.updated"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
+    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.updated", "conversation.membership", "conversation.read", "user.status", "conversation.pins", "conversation.draft", "reminder.updated", "poll.voted"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
     // Scans are slow; keep them off the realtime lane so they never delay message delivery.
     { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 },
     // Link previews wait on other people's servers (up to 5 seconds per link), so they get their own lane too.
@@ -204,8 +229,10 @@ export function startOutboxWorker(io: Server) {
         do {
           again = false;
           const batch = await claim(lane.types, lane.batchSize, lane.leaseSeconds);
-          for (let i = 0; i < batch.length; i += lane.concurrency) {
-            await Promise.all(batch.slice(i, i + lane.concurrency).map(event => handleEvent(lane, event)));
+          const { keep, repeats } = coalesce(batch);
+          if (repeats.length) await prisma.outboxEvent.deleteMany({ where: { id: { in: repeats } } });
+          for (let i = 0; i < keep.length; i += lane.concurrency) {
+            await Promise.all(keep.slice(i, i + lane.concurrency).map(event => handleEvent(lane, event)));
           }
           if (batch.length === lane.batchSize) again = true;
         } while (again && !stopped);

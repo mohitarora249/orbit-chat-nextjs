@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireMessageAccess } from "@/lib/access";
 import { cursorWhere, decodeCursor, encodeCursor, messageSelect, parseLimit, serializeMessage } from "@/lib/messages";
+import { withMyVotes } from "@/lib/polls";
 import { requireUser } from "@/lib/session";
 import { jsonError, routeError } from "@/lib/http";
 
@@ -39,9 +40,10 @@ export async function GET(request: NextRequest, context: Context) {
       })
     ]);
     const items = page.slice(0, limit);
+    const [withVotes, ...messages] = await withMyVotes(user.id, [parent, ...items].map(serializeMessage));
     return NextResponse.json({
-      parent: serializeMessage(parent),
-      messages: items.map(serializeMessage),
+      parent: withVotes,
+      messages,
       nextCursor: page.length > limit ? encodeCursor(items[items.length - 1]) : null
     });
   } catch (error) {

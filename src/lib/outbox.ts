@@ -17,6 +17,8 @@ export type OutboxPayloads = {
   "conversation.draft": { userId: string; conversationId: string };
   // A reminder was set, went off, was snoozed or was marked done.
   "reminder.updated": { userId: string; reminderId: string };
+  // `userId` changed their vote in the poll on `messageId` (their choices go to their own tabs only).
+  "poll.voted": { userId: string; messageId: string };
 };
 export type OutboxEventType = keyof OutboxPayloads;
 
