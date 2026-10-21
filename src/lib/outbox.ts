@@ -9,6 +9,7 @@ export type OutboxPayloads = {
   "conversation.read": { conversationId: string; userId: string; lastReadAt: string };
   "attachment.scan": { attachmentId: string };
   "user.status": { userId: string };
+  "conversation.pins": { userId: string };
 };
 export type OutboxEventType = keyof OutboxPayloads;
 

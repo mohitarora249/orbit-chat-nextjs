@@ -85,3 +85,14 @@ export async function getConversationSummary(conversationId: string) {
   const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { ...conversationSelect, workspaceId: true } });
   return conversation ? { workspaceId: conversation.workspaceId, summary: serializeConversation(conversation) } : null;
 }
+
+// The user's pinned conversations, oldest pin first (the sidebar order). Pins of conversations the user can
+// no longer see are skipped, not deleted, so they come back if access does.
+export async function listPinnedConversationIds(userId: string, workspaceId?: string) {
+  const pins = await prisma.pinnedConversation.findMany({
+    where: { userId, conversation: visibleConversationsWhere(userId, workspaceId) },
+    orderBy: [{ createdAt: "asc" }, { conversationId: "asc" }],
+    select: { conversationId: true }
+  });
+  return pins.map(pin => pin.conversationId);
+}

@@ -4,20 +4,25 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { getPrimaryWorkspaceLink } from "@/lib/workspace";
-import { conversationSelect, listConversations, serializeConversation } from "@/lib/conversations";
+import { conversationSelect, listConversations, listPinnedConversationIds, serializeConversation } from "@/lib/conversations";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
 import { HttpError, jsonError, parseJson, routeError } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
-// Lists the conversations the user can see, with unread counts. The client calls this after reconnecting.
+// Lists the conversations the user can see, with unread counts, and which of them the user pinned.
+// The client calls this after reconnecting.
 export async function GET(request: NextRequest) {
   try {
     const { user, error } = await requireUser(request);
     if (error) return error;
     const workspaceLink = await getPrimaryWorkspaceLink(user.id);
     if (!workspaceLink) return jsonError("You are not a member of any workspace.", 403);
-    return NextResponse.json({ conversations: await listConversations(user.id, workspaceLink.workspaceId) });
+    const [conversations, pinnedConversationIds] = await Promise.all([
+      listConversations(user.id, workspaceLink.workspaceId),
+      listPinnedConversationIds(user.id, workspaceLink.workspaceId)
+    ]);
+    return NextResponse.json({ conversations, pinnedConversationIds });
   } catch (error) {
     return routeError("GET /api/conversations", error, "Could not load conversations.");
   }

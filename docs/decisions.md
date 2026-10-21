@@ -39,3 +39,8 @@
 **SSRF guard (src/lib/unfurl.ts):** http/https on default ports only, no credentials; every resolved address must be public (private, loopback, link-local/metadata, CGNAT, multicast, reserved, IPv6 non-global-unicast, 6to4/Teredo are refused), and the check runs as the socket's DNS lookup so the checked address is the one connected to (no DNS rebinding). Redirects are followed by hand (max 3) and re-checked; one 5-second deadline covers the whole fetch, and at most 1 MB of decompressed HTML is read.  
 **Reason:** Viewers' browsers never contact the linked site to build the card, slow sites never delay message delivery, and a URL is fetched once per day however many people post it.  
 **Note:** Preview images are loaded by viewers' browsers straight from the linked site (https only, `no-referrer`), which reveals their IP address to it. Proxying images through the server is the follow-up if that matters.
+
+## ADR-009: Pinned conversations are personal and never on shared payloads
+**Decision:** `PinnedConversation` is a channel or DM pinned to the top of one user's sidebar. Bootstrap and `GET /api/conversations` return the pinned ids in pin order, and changes are delivered only to the user's own room (`pins:update`, carrying the full list), never on `ConversationSummary`, which is broadcast to other people.  
+**Reason:** Per-viewer state on broadcast payloads would leak who pinned what; sending the whole list keeps tabs correct even if events repeat or arrive out of order.  
+**Note:** Pins of conversations the user can no longer see are hidden rather than deleted, so they return if access does. Limit: 50 per user.

@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import {
-  AtSign, Bell, ChevronDown, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Plus, Search, Users, X
+  AtSign, Bell, ChevronDown, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pin, Plus, Search, Users, X
 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Logo } from "@/components/ui/logo";
@@ -20,7 +20,7 @@ import { mentionsMe, mentionsToText } from "@/lib/mentions";
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
-import type { ActivityItem, Bootstrap, ChatAttachment, ChatMessage, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
+import type { ActivityItem, Bootstrap, ChatAttachment, ChatMessage, ChatUser, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
 
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
@@ -57,6 +57,8 @@ export function ChatApp() {
   const [unreadMarker, setUnreadMarker] = useState<string | null>(null);
   const [thread, setThread] = useState<ThreadState | null>(null);
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
+  // Channels and DMs pinned to the top of the sidebar, in pin order (personal).
+  const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [dialog, setDialog] = useState<"palette" | "create" | "help" | null>(null);
   const [menu, setMenu] = useState<"workspace" | "notifications" | "status" | null>(null);
   // Other people's presence; ours is derived from the socket and `idle`.
@@ -124,6 +126,7 @@ export function ChatApp() {
     try {
       const data = await api<Bootstrap>("/api/bootstrap");
       setBootstrap(data);
+      setPinnedIds(data.pinnedConversationIds);
       setPrefs(readPrefs(data.me.id));
       let last: string | null = null;
       try { last = localStorage.getItem(`orbit-chat-last:${data.me.id}`); } catch { /* storage unavailable */ }
@@ -141,8 +144,9 @@ export function ChatApp() {
 
   const refreshConversations = useCallback(async () => {
     try {
-      const { conversations } = await api<{ conversations: ConversationSummary[] }>("/api/conversations");
+      const { conversations, pinnedConversationIds } = await api<{ conversations: ConversationSummary[]; pinnedConversationIds: string[] }>("/api/conversations");
       setBootstrap(current => current && { ...current, conversations });
+      setPinnedIds(pinnedConversationIds);
     } catch {
       // Keep the current list; the next reconnect or reload retries.
     }
@@ -284,6 +288,7 @@ export function ChatApp() {
     });
   }, []);
 
+
   const notify = useCallback((message: ChatMessage) => {
     const state = bootstrapRef.current;
     const current = prefsRef.current;
@@ -391,6 +396,8 @@ export function ChatApp() {
       setPresence(current => current[userId] === next ? current : { ...current, [userId]: next });
     });
     socket.on("status:update", ({ userId, status }: { userId: string; status: UserStatus | null }) => setStatus(userId, status));
+    // Pinning or unpinning a conversation in another tab or device.
+    socket.on("pins:update", ({ conversationIds }: { conversationIds: string[] }) => setPinnedIds(conversationIds));
     socket.on("typing", (event: { conversationId: string; parentId: string | null; userId: string; displayName: string; typing: boolean }) => {
       if (event.userId === meId) return;
       const key = typingKey(event.conversationId, event.parentId);
@@ -524,6 +531,19 @@ export function ChatApp() {
       setNotice(error instanceof Error ? error.message : "Could not update reaction.");
     }
   }, [applyUpdated]);
+
+  async function togglePin(conversationId: string) {
+    const pin = !pinnedIds.includes(conversationId);
+    const before = pinnedIds;
+    setPinnedIds(current => pin ? [...current.filter(id => id !== conversationId), conversationId] : current.filter(id => id !== conversationId));
+    try {
+      const { pinnedConversationIds } = await api<{ pinnedConversationIds: string[] }>(`/api/conversations/${conversationId}/pin`, { method: pin ? "PUT" : "DELETE" });
+      setPinnedIds(pinnedConversationIds);
+    } catch (error) {
+      setPinnedIds(before);
+      setNotice(error instanceof Error ? error.message : pin ? "Could not pin conversation." : "Could not unpin conversation.");
+    }
+  }
 
   const onEdit = useCallback(async (message: ChatMessage, body: string) => {
     try {
@@ -677,11 +697,18 @@ export function ChatApp() {
       : <div className="flex min-h-dvh flex-col items-center justify-center gap-4 text-sm text-zinc-400"><Logo className="h-9 w-9 animate-pulse rounded-xl"/>Loading your workspace…</div>;
   }
 
-  const channels = bootstrap.conversations.filter(c => c.type === "CHANNEL" && c.name.includes(filter.toLowerCase().replace(/^#/, "")));
+  // Pinned channels and DMs move out of their usual section into Pinned, in the order they were pinned.
+  const pinnedSet = new Set(pinnedIds);
+  const matchesFilter = (c: ConversationSummary) => c.type === "CHANNEL"
+    ? c.name.includes(filter.toLowerCase().replace(/^#/, ""))
+    : (usersById.get(dmPartnerId(c, me.id))?.displayName ?? "").toLowerCase().includes(filter.toLowerCase());
+  const pinnedConversations = pinnedIds.flatMap(id => bootstrap.conversations.find(c => c.id === id) ?? []).filter(matchesFilter);
+  const channels = bootstrap.conversations.filter(c => c.type === "CHANNEL" && !pinnedSet.has(c.id) && matchesFilter(c));
   const dmByPartner = new Map(bootstrap.conversations.filter(c => c.type === "DM").map(c => [dmPartnerId(c, me.id), c]));
   const people = [...bootstrap.users]
-    .filter(user => user.displayName.toLowerCase().includes(filter.toLowerCase()))
+    .filter(user => user.displayName.toLowerCase().includes(filter.toLowerCase()) && !pinnedSet.has(dmByPartner.get(user.id)?.id ?? ""))
     .sort((a, b) => Number(b.id === me.id) - Number(a.id === me.id) || a.displayName.localeCompare(b.displayName));
+  const activePinned = activeConversation !== null && pinnedSet.has(activeConversation.id);
   const activeLabel = activeConversation ? label(activeConversation) : "Choose a conversation";
   const activePartner = activeConversation?.type === "DM" ? usersById.get(dmPartnerId(activeConversation, me.id)) : undefined;
   // Public channels can mention anyone in the workspace; DMs and private channels only their members.
@@ -732,6 +759,32 @@ export function ChatApp() {
     </div>
   );
   const iconAction = "rounded-md p-1 text-zinc-400 transition hover:bg-zinc-200/60 hover:text-zinc-700";
+  const channelRow = (item: ConversationSummary) => {
+    const active = activeId === item.id;
+    const unread = item.unreadCount > 0 && !active;
+    const mentioned = item.mentionCount > 0 && !active;
+    const muted = prefs.muted.includes(item.id);
+    const Icon = item.isPrivate ? Lock : Hash;
+    return (
+      <button key={item.id} onClick={() => openConversation(item.id)} className={cn(navItem(active, mentioned || (unread && !muted)), muted && !mentioned && !active && "opacity-60")}>
+        <Icon size={item.isPrivate ? 13 : 15} className={active ? "text-brand-600" : "text-zinc-400"}/><span className="truncate">{item.name}</span>
+        {!active && unreadBadge(item, muted)}
+      </button>
+    );
+  };
+  // One row per person; `dm` is the existing conversation with them, if any.
+  const dmRow = (user: ChatUser, dm: ConversationSummary | undefined) => {
+    const active = dm !== undefined && dm.id === activeId;
+    const unread = dm !== undefined && (dm.unreadCount > 0 || dm.mentionCount > 0) && !active;
+    return (
+      <button key={user.id} onClick={() => void openDm(user.id)} className={navItem(active, unread)}>
+        <Avatar name={user.displayName} color={user.avatarColor} size="sm" presence={presenceOf(user.id)} dnd={isDnd(statusOf(user.id), now)}/>
+        <span className="truncate">{user.displayName}{user.id === me.id && <span className="font-normal text-zinc-400"> (you)</span>}</span>
+        {statusEmoji(user.id)}
+        {dm && !active && unreadBadge(dm, prefs.muted.includes(dm.id))}
+      </button>
+    );
+  };
 
   return (
     <main className="relative flex h-dvh overflow-hidden bg-background">
@@ -758,40 +811,30 @@ export function ChatApp() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 pb-4 pt-5">
+          {pinnedConversations.length > 0 && (
+            <>
+              {sectionHeader("Pinned", null)}
+              <div className="space-y-0.5">
+                {pinnedConversations.map(item => {
+                  if (item.type === "CHANNEL") return channelRow(item);
+                  const partner = usersById.get(dmPartnerId(item, me.id));
+                  return partner ? dmRow(partner, item) : null;
+                })}
+              </div>
+              <div className="mt-6"/>
+            </>
+          )}
+
           {sectionHeader("Channels", <button title="Create channel" aria-label="Create channel" onClick={() => setDialog("create")} className={iconAction}><Plus size={14}/></button>)}
           <div className="space-y-0.5">
-            {channels.map(item => {
-              const active = activeId === item.id;
-              const unread = item.unreadCount > 0 && !active;
-              const mentioned = item.mentionCount > 0 && !active;
-              const muted = prefs.muted.includes(item.id);
-              const Icon = item.isPrivate ? Lock : Hash;
-              return (
-                <button key={item.id} onClick={() => openConversation(item.id)} className={cn(navItem(active, mentioned || (unread && !muted)), muted && !mentioned && !active && "opacity-60")}>
-                  <Icon size={item.isPrivate ? 13 : 15} className={active ? "text-brand-600" : "text-zinc-400"}/><span className="truncate">{item.name}</span>
-                  {!active && unreadBadge(item, muted)}
-                </button>
-              );
-            })}
-            {channels.length === 0 && <p className="px-2.5 py-1 text-xs text-zinc-400">No channels match.</p>}
+            {channels.map(channelRow)}
+            {channels.length === 0 && <p className="px-2.5 py-1 text-xs text-zinc-400">{filter ? "No channels match." : pinnedConversations.some(c => c.type === "CHANNEL") ? "All your channels are pinned." : "No channels yet."}</p>}
           </div>
 
           <div className="mt-6"/>
           {sectionHeader("Direct messages", <button title="New direct message" aria-label="New direct message" onClick={() => setDialog("palette")} className={iconAction}><Plus size={14}/></button>)}
           <div className="space-y-0.5">
-            {people.map(user => {
-              const dm = dmByPartner.get(user.id);
-              const active = dm !== undefined && dm.id === activeId;
-              const unread = dm !== undefined && (dm.unreadCount > 0 || dm.mentionCount > 0) && !active;
-              return (
-                <button key={user.id} onClick={() => void openDm(user.id)} className={navItem(active, unread)}>
-                  <Avatar name={user.displayName} color={user.avatarColor} size="sm" presence={presenceOf(user.id)} dnd={isDnd(statusOf(user.id), now)}/>
-                  <span className="truncate">{user.displayName}{user.id === me.id && <span className="font-normal text-zinc-400"> (you)</span>}</span>
-                  {statusEmoji(user.id)}
-                  {dm && !active && unreadBadge(dm, prefs.muted.includes(dm.id))}
-                </button>
-              );
-            })}
+            {people.map(user => dmRow(user, dmByPartner.get(user.id)))}
           </div>
         </div>
 
@@ -833,6 +876,12 @@ export function ChatApp() {
           <div className="relative flex items-center gap-0.5">
             <Button variant="ghost" size="icon" title="Search (⌘K)" aria-label="Search" onClick={() => setDialog("palette")} className="h-8 w-8"><Search size={16}/></Button>
             <Button variant="ghost" size="icon" title="Notifications" aria-label="Notifications" aria-expanded={menu === "notifications"} onClick={() => setMenu(current => current === "notifications" ? null : "notifications")} className="h-8 w-8"><Bell size={16}/></Button>
+            {activeConversation && (
+              <Button variant="ghost" size="icon" title={activePinned ? "Unpin from sidebar" : "Pin to sidebar"} aria-label={activePinned ? "Unpin from sidebar" : "Pin to sidebar"} aria-pressed={activePinned}
+                onClick={() => void togglePin(activeConversation.id)} className={cn("h-8 w-8", activePinned && "text-brand-600 hover:text-brand-700")}>
+                <Pin size={16} className={cn(activePinned && "fill-current")}/>
+              </Button>
+            )}
             <Button variant="ghost" size="icon" title="People" aria-label="People" onClick={() => setRightPanel(current => current === "people" ? null : "people")} className={cn("h-8 w-8", rightPanel === "people" && "bg-zinc-100 text-zinc-900")}><Users size={16}/></Button>
             {menu === "notifications" && <NotificationsMenu prefs={prefs} onChange={savePrefs} conversation={activeConversation} label={activeLabel} onClose={() => setMenu(null)}/>}
           </div>

@@ -34,29 +34,30 @@ enum LinkPreviewStatus {
 
 // `name` in Better Auth is mapped to `displayName` (see src/lib/auth.ts).
 model User {
-  id              String               @id @default(cuid())
-  displayName     String
-  email           String               @unique
-  emailVerified   Boolean              @default(false)
-  image           String?
-  avatarColor     String               @default("#6D5EF6")
+  id                  String               @id @default(cuid())
+  displayName         String
+  email               String               @unique
+  emailVerified       Boolean              @default(false)
+  image               String?
+  avatarColor         String               @default("#6D5EF6")
   // Custom status; null statusExpiresAt means "don't clear". Expired statuses are ignored, not deleted.
-  statusEmoji     String?
-  statusText      String?
-  statusExpiresAt DateTime?
+  statusEmoji         String?
+  statusText          String?
+  statusExpiresAt     DateTime?
   // Do Not Disturb; null dndUntil means "until turned off".
-  dnd             Boolean              @default(false)
-  dndUntil        DateTime?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @default(now()) @updatedAt
-  workspaceLinks  WorkspaceMember[]
-  memberships     ConversationMember[]
-  messages        Message[]
-  reactions       Reaction[]
-  readCursors     ReadCursor[]
-  sessions        Session[]
-  accounts        Account[]
-  attachments     Attachment[]
+  dnd                 Boolean              @default(false)
+  dndUntil            DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @default(now()) @updatedAt
+  workspaceLinks      WorkspaceMember[]
+  memberships         ConversationMember[]
+  messages            Message[]
+  reactions           Reaction[]
+  readCursors         ReadCursor[]
+  sessions            Session[]
+  accounts            Account[]
+  attachments         Attachment[]
+  pinnedConversations PinnedConversation[]
 }
 
 // Better Auth tables.
@@ -142,6 +143,7 @@ model Conversation {
   messages    Message[]
   readCursors ReadCursor[]
   attachments Attachment[]
+  pinnedBy    PinnedConversation[]
 
   @@unique([workspaceId, type, name])
 }
@@ -231,6 +233,19 @@ model Attachment {
 
   @@index([messageId])
   @@index([uploaderId, status])
+}
+
+// A channel or DM the user pinned to the top of their sidebar. Personal: nobody else sees it.
+// Not tied to membership, because public channels can be seen (and pinned) without joining.
+model PinnedConversation {
+  userId         String
+  conversationId String
+  createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@index([conversationId])
 }
 
 // Open Graph data for a URL, shared by every message that links to it. This table is the unfurl cache:

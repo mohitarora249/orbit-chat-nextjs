@@ -70,6 +70,8 @@ export type Bootstrap = {
   statuses: Record<string, UserStatus>;
   workspace: { id: string; name: string; slug: string; role: "OWNER" | "ADMIN" | "MEMBER" };
   conversations: ConversationSummary[];
+  // Conversations the user pinned to the top of their sidebar, in pin order.
+  pinnedConversationIds: string[];
 };
 
 export type SearchHit = {
