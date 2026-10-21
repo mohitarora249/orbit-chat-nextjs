@@ -54,7 +54,7 @@ function MessageBody({ body, usersById, meId }: { body: string; usersById: Map<s
         if (typeof part === "string") return <TextWithLinks key={index} text={part}/>;
         const forMe = part.kind !== "user" || part.userId === meId;
         const label = part.kind === "user" ? usersById.get(part.userId)?.displayName ?? "unknown user" : part.kind;
-        return <span key={index} className={cn("rounded px-0.5 font-semibold", forMe ? "bg-amber-200/80 text-amber-950" : "bg-brand-50 text-brand-700")}>@{label}</span>;
+        return <span key={index} className={cn("rounded px-0.5 font-semibold", forMe ? "bg-amber-200/80 text-amber-900" : "bg-brand-50 text-brand-700")}>@{label}</span>;
       })}
     </>
   );
@@ -87,7 +87,7 @@ function AttachmentView({ attachment }: { attachment: ChatAttachment }) {
       {attachment.status === "CLEAN" && <Download size={14} className="text-zinc-400"/>}
     </>
   );
-  const className = "flex w-full max-w-xs items-center gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 transition";
+  const className = "flex w-full max-w-xs items-center gap-3 rounded-lg border border-zinc-200 bg-card px-3 py-2 transition";
   return attachment.status === "CLEAN"
     ? <a href={href} className={cn(className, "hover:border-zinc-300 hover:bg-zinc-50")}>{content}</a>
     : <div className={className}>{content}</div>;
@@ -97,7 +97,7 @@ function LinkPreviewCard({ preview }: { preview: ChatLinkPreview }) {
   const [showImage, setShowImage] = useState(true);
   const site = preview.siteName ?? new URL(preview.url).hostname.replace(/^www\./, "");
   return (
-    <a href={preview.url} target="_blank" rel={LINK_REL} className="flex w-full max-w-md gap-3 rounded-lg border border-l-[3px] border-zinc-200 border-l-zinc-300 bg-white px-3 py-2.5 transition hover:border-zinc-300 hover:border-l-brand-400 hover:bg-zinc-50">
+    <a href={preview.url} target="_blank" rel={LINK_REL} className="flex w-full max-w-md gap-3 rounded-lg border border-l-[3px] border-zinc-200 border-l-zinc-300 bg-card px-3 py-2.5 transition hover:border-zinc-300 hover:border-l-brand-400 hover:bg-zinc-50">
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[11px] font-medium text-zinc-400">{site}</span>
         {preview.title && <span className="line-clamp-2 text-[13px] font-semibold leading-5 text-brand-700">{preview.title}</span>}
@@ -206,12 +206,12 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
         {deleted ? (
           <p className="text-sm italic leading-6 text-zinc-400">This message was deleted.</p>
         ) : editing ? (
-          <div className="mt-1 rounded-lg border border-zinc-200 bg-white p-2 shadow-float ring-2 ring-brand-100">
+          <div className="mt-1 rounded-lg border border-zinc-200 bg-card p-2 shadow-float ring-2 ring-brand-100">
             <textarea autoFocus value={editDraft} onChange={event => setEditDraft(event.target.value)} onKeyDown={onEditKey} rows={2} maxLength={4000} aria-label="Edit message" className="w-full resize-y bg-transparent text-sm leading-6 outline-none"/>
             <div className="mt-1 flex items-center justify-end gap-2 text-[11px]">
               <span className="mr-auto text-zinc-400">Esc to cancel · Enter to save</span>
               <button onClick={() => setEditing(false)} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition hover:bg-zinc-100">Cancel</button>
-              <button onClick={() => void saveEdit()} disabled={saving} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50">{saving ? "Saving…" : "Save"}</button>
+              <button onClick={() => void saveEdit()} disabled={saving} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-zinc-50 transition hover:bg-zinc-800 disabled:opacity-50">{saving ? "Saving…" : "Save"}</button>
             </div>
           </div>
         ) : (
@@ -240,7 +240,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
               const reacted = reaction.userIds.includes(me.id);
               return (
                 <button key={reaction.emoji} onClick={() => onReact(message, reaction.emoji, !reacted)} title={`${reactionNames(reaction.userIds)} reacted with ${reaction.emoji}`}
-                  className={cn("flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs transition active:scale-95", reacted ? "border-brand-200 bg-brand-50 text-brand-700" : "border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50")}>
+                  className={cn("flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs transition active:scale-95", reacted ? "border-brand-200 bg-brand-50 text-brand-700" : "border-zinc-200 bg-card text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50")}>
                   <span>{reaction.emoji}</span><span className="font-medium tabular-nums">{reaction.userIds.length}</span>
                 </button>
               );
@@ -248,7 +248,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
           </div>
         )}
         {onOpenThread && (message.replyCount > 0 || replyTyping) && (
-          <button onClick={() => onOpenThread(message)} className="-ml-1.5 mt-1 flex items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-brand-600 transition hover:bg-white hover:ring-1 hover:ring-zinc-200">
+          <button onClick={() => onOpenThread(message)} className="-ml-1.5 mt-1 flex items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-brand-600 transition hover:bg-card hover:ring-1 hover:ring-zinc-200">
             <MessageSquareText size={14}/>{message.replyCount > 0 ? `${message.replyCount} ${message.replyCount === 1 ? "reply" : "replies"}` : "Thread"}
             {replyTyping
               ? <span aria-live="polite" className="font-normal italic text-zinc-500">{replyTyping}</span>
@@ -257,7 +257,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
         )}
       </div>
       {!pending && !deleted && !editing && (
-        <div className={cn("absolute -top-4 right-2 z-10 items-center gap-0.5 rounded-lg border border-zinc-200/80 bg-white p-0.5 shadow-float", picker ? "flex" : "hidden group-hover:flex group-focus-within:flex")}>
+        <div className={cn("absolute -top-4 right-2 z-10 items-center gap-0.5 rounded-lg border border-zinc-200/80 bg-card p-0.5 shadow-float", picker ? "flex" : "hidden group-hover:flex group-focus-within:flex")}>
           <button title="Add reaction" aria-label="Add reaction" onClick={() => setPicker(true)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><SmilePlus size={15}/></button>
           {onOpenThread && <button title="Reply in thread" aria-label="Reply in thread" onClick={() => onOpenThread(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><MessageSquareText size={15}/></button>}
           <button title="Forward message" aria-label="Forward message" onClick={() => onForward(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Forward size={15}/></button>

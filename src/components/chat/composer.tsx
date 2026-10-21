@@ -305,9 +305,9 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
   return (
     <div>
       <form onSubmit={submit} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}
-        className={cn("relative rounded-xl border bg-white shadow-float transition duration-150 focus-within:border-zinc-300 focus-within:shadow-soft", dragging ? "border-brand-400 ring-4 ring-brand-100" : "border-zinc-200")}>
+        className={cn("relative rounded-xl border bg-card shadow-float transition duration-150 focus-within:border-zinc-300 focus-within:shadow-soft", dragging ? "border-brand-400 ring-4 ring-brand-100" : "border-zinc-200")}>
         {suggesting && (
-          <ul id={`${listId}-mentions`} role="listbox" aria-label="Mention suggestions" className="absolute bottom-full left-0 z-40 mb-2 w-72 max-w-full animate-pop-in overflow-hidden rounded-xl border border-zinc-200/80 bg-white p-1 shadow-soft">
+          <ul id={`${listId}-mentions`} role="listbox" aria-label="Mention suggestions" className="absolute bottom-full left-0 z-40 mb-2 w-72 max-w-full animate-pop-in overflow-hidden rounded-xl border border-zinc-200/80 bg-card p-1 shadow-soft">
             {suggestions.map((suggestion, index) => (
               <Fragment key={suggestion.kind === "user" ? suggestion.user.id : suggestion.kind}>
                 {(index === 0 || (suggestion.kind === "user") !== (suggestions[index - 1].kind === "user")) && (

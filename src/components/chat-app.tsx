@@ -854,7 +854,7 @@ export function ChatApp() {
     : unreadBadge(conversation, muted);
   const navItem = (active: boolean, unread = false) => cn(
     "flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] transition duration-150",
-    active ? "bg-white font-medium text-zinc-900 shadow-float ring-1 ring-zinc-200/70" : unread ? "font-semibold text-zinc-900 hover:bg-zinc-200/50" : "text-zinc-600 hover:bg-zinc-200/50 hover:text-zinc-900"
+    active ? "bg-card font-medium text-zinc-900 shadow-float ring-1 ring-zinc-200/70" : unread ? "font-semibold text-zinc-900 hover:bg-zinc-200/50" : "text-zinc-600 hover:bg-zinc-200/50 hover:text-zinc-900"
   );
   const sectionHeader = (title: string, action: React.ReactNode) => (
     <div className="mb-1 flex h-7 items-center justify-between pl-2.5 pr-1">
@@ -903,7 +903,7 @@ export function ChatApp() {
           {menu === "workspace" && (
             <WorkspaceMenu workspace={bootstrap.workspace} me={me} onCreateChannel={() => setDialog("create")} onHelp={() => setDialog("help")} onSignOut={() => void signOut()} onNotice={setNotice} onClose={() => setMenu(null)}/>
           )}
-          <div className="mt-2 flex h-8 items-center gap-2 rounded-md border border-zinc-200/80 bg-white px-2.5 transition focus-within:border-brand-300 focus-within:ring-2 focus-within:ring-brand-100">
+          <div className="mt-2 flex h-8 items-center gap-2 rounded-md border border-zinc-200/80 bg-card px-2.5 transition focus-within:border-brand-300 focus-within:ring-2 focus-within:ring-brand-100">
             <Search size={14} className="shrink-0 text-zinc-400"/>
             <input value={filter} onChange={event => setFilter(event.target.value)} placeholder="Filter" aria-label="Filter channels and people" className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-zinc-400"/>
             <button onClick={() => setDialog("palette")} title="Jump to or search (⌘K)" className="rounded border border-zinc-200 px-1 font-mono text-[10px] text-zinc-400 transition hover:border-zinc-300 hover:text-zinc-600">⌘K</button>
@@ -963,7 +963,7 @@ export function ChatApp() {
         </div>
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col bg-white">
+      <section className="flex min-w-0 flex-1 flex-col bg-card">
         <header className="flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200/80 px-3 sm:px-5">
           <Button variant="ghost" size="icon" title="Channels" aria-label="Open channel list" onClick={() => setShowSidebar(true)} className="h-8 w-8 shrink-0 md:hidden"><Menu size={18}/></Button>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -992,7 +992,7 @@ export function ChatApp() {
         </header>
 
         {notice && (
-          <div role="status" className="mx-auto mt-3 flex w-[calc(100%-2rem)] max-w-3xl animate-fade-up items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-700 shadow-float">
+          <div role="status" className="mx-auto mt-3 flex w-[calc(100%-2rem)] max-w-3xl animate-fade-up items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-card px-3 py-2 text-[13px] text-zinc-700 shadow-float">
             <span>{notice}</span>
             <button onClick={() => setNotice("")} aria-label="Dismiss notice" className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"><X size={14}/></button>
           </div>
@@ -1034,7 +1034,7 @@ export function ChatApp() {
                   {newDay && (
                     <div className="my-3 flex items-center gap-3">
                       <div className="h-px flex-1 bg-zinc-100"/>
-                      <span className="rounded-full border border-zinc-200/80 bg-white px-2.5 py-0.5 text-[11px] font-medium text-zinc-500">{dayLabel(message.createdAt)}</span>
+                      <span className="rounded-full border border-zinc-200/80 bg-card px-2.5 py-0.5 text-[11px] font-medium text-zinc-500">{dayLabel(message.createdAt)}</span>
                       <div className="h-px flex-1 bg-zinc-100"/>
                     </div>
                   )}
@@ -1080,7 +1080,7 @@ export function ChatApp() {
 
       {mentionToast && (
         <div role="status" aria-live="polite" className="fixed right-4 top-16 z-40 w-[min(360px,calc(100vw-2rem))] animate-pop-in">
-          <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-white p-3 shadow-soft">
+          <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-card p-3 shadow-soft">
             <button onClick={() => { const { message } = mentionToast; setMentionToast(null); jumpTo(message.conversationId, message.id, message.parentId); }} className="flex min-w-0 flex-1 items-start gap-3 text-left">
               <Avatar name={mentionToast.message.author.displayName} color={mentionToast.message.author.avatarColor}/>
               <span className="min-w-0 flex-1">

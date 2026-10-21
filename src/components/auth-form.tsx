@@ -8,7 +8,7 @@ import { authClient } from "@/lib/auth-client";
 
 type Mode = "signin" | "signup";
 
-const inputClass = "mt-1.5 block h-10 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm font-normal outline-none transition placeholder:text-zinc-400 focus:border-brand-300 focus:ring-4 focus:ring-brand-100/60";
+const inputClass = "mt-1.5 block h-10 w-full rounded-lg border border-zinc-200 bg-card px-3 text-sm font-normal outline-none transition placeholder:text-zinc-400 focus:border-brand-300 focus:ring-4 focus:ring-brand-100/60";
 
 export function AuthForm({ initialMode, showDemoHint }: { initialMode: Mode; showDemoHint: boolean }) {
   const router = useRouter();
@@ -63,7 +63,7 @@ export function AuthForm({ initialMode, showDemoHint }: { initialMode: Mode; sho
           </button>
         </p>
         {showDemoHint && mode === "signin" && (
-          <p className="mt-8 rounded-lg border border-zinc-200 bg-white px-3.5 py-3 text-xs leading-5 text-zinc-500">
+          <p className="mt-8 rounded-lg border border-zinc-200 bg-card px-3.5 py-3 text-xs leading-5 text-zinc-500">
             Local demo: sign in as <b>mohit@example.com</b>, <b>aisha@example.com</b> or <b>rohan@example.com</b> with password <b>orbit-demo-123</b> (after <code>npm run db:seed</code>).
           </p>
         )}

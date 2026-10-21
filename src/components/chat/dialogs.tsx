@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, Fragment, KeyboardEvent, useEffect, useMemo, useState } from "react";
-import { Bell, BellOff, Check, Hash, HelpCircle, Link2, Loader2, Lock, LogOut, Plus, Search, ShieldAlert, X } from "lucide-react";
+import { Bell, BellOff, Check, Hash, HelpCircle, Link2, Loader2, Lock, LogOut, Monitor, Moon, Plus, Search, ShieldAlert, Sun, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, Popover } from "@/components/ui/overlay";
@@ -9,6 +9,7 @@ import { dayLabel, timeLabel } from "@/components/chat/helpers";
 import { ForwardedCard, forwardSourceLabel } from "@/components/chat/message-item";
 import { api } from "@/lib/api";
 import { mentionsToText } from "@/lib/mentions";
+import { ACCENTS, useTheme, type ThemeMode } from "@/lib/theme";
 import { cn, HIGHLIGHT_END, HIGHLIGHT_START } from "@/lib/utils";
 import type { ChatForward, ChatMessage, ChatUser, ConversationSummary, SearchHit } from "@/lib/types";
 
@@ -359,6 +360,39 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+const THEME_MODES: { mode: ThemeMode; label: string; icon: React.ReactNode }[] = [
+  { mode: "light", label: "Light", icon: <Sun size={13}/> },
+  { mode: "system", label: "System", icon: <Monitor size={13}/> },
+  { mode: "dark", label: "Dark", icon: <Moon size={13}/> }
+];
+
+// Light / dark / follow the OS, plus the accent hue. Saved in this browser.
+function AppearancePicker() {
+  const { mode, accent, setPrefs } = useTheme();
+  return (
+    <div className="border-b border-zinc-100 px-2.5 py-2.5">
+      <div className="text-[11px] font-medium text-zinc-400">Appearance</div>
+      <div role="radiogroup" aria-label="Color theme" className="mt-1.5 grid grid-cols-3 gap-0.5 rounded-lg bg-zinc-100 p-0.5">
+        {THEME_MODES.map(option => (
+          <button key={option.mode} role="radio" aria-checked={mode === option.mode} onClick={() => setPrefs({ mode: option.mode })}
+            className={cn("flex h-7 items-center justify-center gap-1.5 rounded-md text-[12px] font-medium transition", mode === option.mode ? "bg-card text-zinc-900 shadow-float" : "text-zinc-500 hover:text-zinc-800")}>
+            {option.icon}{option.label}
+          </button>
+        ))}
+      </div>
+      <div role="radiogroup" aria-label="Accent color" className="mt-2.5 flex items-center gap-2">
+        {ACCENTS.map(option => (
+          <button key={option.id} role="radio" aria-checked={accent === option.id} aria-label={option.label} title={option.label} onClick={() => setPrefs({ accent: option.id })}
+            style={{ backgroundColor: `hsl(${option.hue} 55% 52%)` }}
+            className={cn("flex h-5 w-5 items-center justify-center rounded-full text-white transition", accent === option.id ? "ring-2 ring-zinc-900/80 ring-offset-2 ring-offset-card" : "hover:scale-110")}>
+            {accent === option.id && <Check size={11} strokeWidth={3}/>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function WorkspaceMenu({ workspace, me, onCreateChannel, onHelp, onSignOut, onNotice, onClose }: {
   workspace: { name: string; role: string };
   me: ChatUser & { email: string };
@@ -385,6 +419,7 @@ export function WorkspaceMenu({ workspace, me, onCreateChannel, onHelp, onSignOu
         <div className="text-sm font-semibold tracking-tight">{workspace.name}</div>
         <div className="mt-0.5 text-[11px] text-zinc-500">Signed in as {me.email} · {workspace.role.toLowerCase()}</div>
       </div>
+      <AppearancePicker/>
       <div className="pt-1.5">
         <button className={item} onClick={() => { onClose(); onCreateChannel(); }}><Plus size={14}/>Create a channel</button>
         <button className={item} onClick={() => void copyInvite()}><Link2 size={14}/>Copy invite link</button>

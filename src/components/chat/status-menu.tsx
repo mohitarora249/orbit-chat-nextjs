@@ -111,7 +111,7 @@ export function StatusMenu({ me, status, presence, onSave, onClose }: {
           </div>
         ) : (
           <form onSubmit={submitCustom} className="mt-1.5">
-            <div className="relative flex h-8 items-center gap-1 rounded-md border border-zinc-200 bg-white pl-1 pr-2 focus-within:border-brand-300 focus-within:ring-2 focus-within:ring-brand-100">
+            <div className="relative flex h-8 items-center gap-1 rounded-md border border-zinc-200 bg-card pl-1 pr-2 focus-within:border-brand-300 focus-within:ring-2 focus-within:ring-brand-100">
               <button type="button" onClick={() => setPicker(!picker)} title="Choose an emoji" aria-label="Choose an emoji" className="flex h-6 w-6 items-center justify-center rounded text-base hover:bg-zinc-100">
                 {emoji || <Smile size={14} className="text-zinc-400"/>}
               </button>
@@ -132,7 +132,7 @@ export function StatusMenu({ me, status, presence, onSave, onClose }: {
             <div className="mt-2 flex items-center gap-2">
               <label className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] text-zinc-500">
                 Clear after
-                <select value={expiry} onChange={event => setExpiry(event.target.value as Expiry)} className="min-w-0 flex-1 rounded-md border border-zinc-200 bg-white px-1.5 py-1 text-[11px] text-zinc-700 outline-none focus:border-brand-300">
+                <select value={expiry} onChange={event => setExpiry(event.target.value as Expiry)} className="min-w-0 flex-1 rounded-md border border-zinc-200 bg-card px-1.5 py-1 text-[11px] text-zinc-700 outline-none focus:border-brand-300">
                   {(Object.keys(EXPIRY_LABELS) as Expiry[]).map(key => <option key={key} value={key}>{EXPIRY_LABELS[key]}</option>)}
                 </select>
               </label>

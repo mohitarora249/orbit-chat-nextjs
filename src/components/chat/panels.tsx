@@ -13,7 +13,7 @@ import type { ActivityItem, ChatAttachment, ChatMessage, ChatUser } from "@/lib/
 
 function PanelShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode }) {
   return (
-    <aside className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[420px] shrink-0 animate-fade-up flex-col border-l border-zinc-200/80 bg-white shadow-soft sm:w-[380px] xl:static xl:z-auto xl:shadow-none">
+    <aside className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[420px] shrink-0 animate-fade-up flex-col border-l border-zinc-200/80 bg-card shadow-soft sm:w-[380px] xl:static xl:z-auto xl:shadow-none">
       <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-200/80 px-4">
         <div className="flex min-w-0 items-baseline gap-2"><h2 className="shrink-0 text-[15px] font-semibold tracking-tight">{title}</h2>{subtitle && <p className="truncate text-[13px] text-zinc-400">{subtitle}</p>}</div>
         <button onClick={onClose} aria-label={`Close ${title}`} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"><X size={16}/></button>
@@ -59,7 +59,7 @@ export function ThreadPanel({ thread, conversationName, me, canModerate, usersBy
               <MessageItem key={reply.id} message={reply} grouped={isGrouped(reply, replies[index - 1])} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === reply.id} {...actions}/>
             ))}
             {thread.nextCursor && (
-              <button onClick={onLoadMore} disabled={thread.loading} className="mx-auto mt-3 block rounded-md border border-zinc-200 bg-white px-3 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 disabled:text-zinc-400">
+              <button onClick={onLoadMore} disabled={thread.loading} className="mx-auto mt-3 block rounded-md border border-zinc-200 bg-card px-3 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 disabled:text-zinc-400">
                 {thread.loading ? "Loading…" : "Load more replies"}
               </button>
             )}
