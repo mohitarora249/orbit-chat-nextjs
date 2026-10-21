@@ -13,7 +13,8 @@ worker adds the rooms for everyone who can see it.
 ```
 This is dropped unless the socket is already in that conversation's room. "Started typing" is throttled
 to one per second per socket. Clients re-send it every few seconds while the user types, and expire it
-after about 6 seconds without one.
+after about 6 seconds without one. With a `parentId`, the open thread shows "… is typing" and the parent
+message in the conversation shows "… is replying".
 
 ### `presence:list` (with acknowledgement)
 The acknowledgement is called with `{ [userId]: "active" | "away" }` for users online in the sender's workspaces.

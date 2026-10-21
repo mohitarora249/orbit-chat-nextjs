@@ -516,24 +516,18 @@ export function ChatApp() {
     return () => clearInterval(timer);
   }, []);
 
-  const typingText = useCallback((conversationId: string, parentId?: string | null) => {
+  // "typing" in the composer; "replying" on a thread's parent in the message list.
+  const typingText = useCallback((conversationId: string, parentId?: string | null, verb = "typing") => {
     const names = Object.values(typing[typingKey(conversationId, parentId)] ?? {}).map(value => value.name);
     if (!names.length) return null;
-    if (names.length === 1) return `${names[0]} is typing…`;
-    if (names.length === 2) return `${names[0]} and ${names[1]} are typing…`;
-    return "Several people are typing…";
+    if (names.length === 1) return `${names[0]} is ${verb}…`;
+    if (names.length === 2) return `${names[0]} and ${names[1]} are ${verb}…`;
+    return `Several people are ${verb}…`;
   }, [typing]);
 
   const emitTyping = useCallback((conversationId: string, parentId: string | null, isTyping: boolean) => {
     socketRef.current?.emit("typing", { conversationId, parentId, typing: isTyping });
   }, []);
-  const onChannelTyping = useCallback((isTyping: boolean) => {
-    if (activeIdRef.current) emitTyping(activeIdRef.current, null, isTyping);
-  }, [emitTyping]);
-  const onThreadTyping = useCallback((isTyping: boolean) => {
-    const conversationId = activeIdRef.current;
-    if (conversationId && threadIdRef.current) emitTyping(conversationId, threadIdRef.current, isTyping);
-  }, [emitTyping]);
 
   // ---- Actions -------------------------------------------------------------------------------------------
 
@@ -1047,7 +1041,7 @@ export function ChatApp() {
                   {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
                   <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
                     highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
-                    onForward={onForward} openForwarded={openForwarded}/>
+                    replyTyping={typingText(message.conversationId, message.id, "replying")} onForward={onForward} openForwarded={openForwarded}/>
                   {seenId === message.id && (
                     <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
                   )}
@@ -1063,7 +1057,7 @@ export function ChatApp() {
           <div className="mx-auto max-w-3xl">
             {activeConversation && (
               <Composer key={activeConversation.id} conversationId={activeConversation.id} placeholder={`Message ${activePartner ? activeLabel : `#${activeLabel}`}`}
-                typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={onChannelTyping} onNotice={setNotice}
+                typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={emitTyping} onNotice={setNotice}
                 savedDraft={drafts[activeConversation.id]?.body} onDraftChange={body => saveDraft(activeConversation.id, body)}
                 onSend={(body, attachments) => sendMessage(activeConversation.id, null, body, attachments)}/>
             )}
@@ -1077,7 +1071,7 @@ export function ChatApp() {
           typingText={typingText(thread.parent?.conversationId ?? activeId ?? "", thread.parentId)} highlightId={highlightId} mentionable={mentionable}
           broadcastMentions={activeConversation?.type === "CHANNEL"} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
           onSend={(body, attachments) => sendMessage(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, body, attachments)}
-          onTyping={onThreadTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} openForwarded={openForwarded}/>
+          onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} openForwarded={openForwarded}/>
       )}
       {rightPanel === "activity" && (
         <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>

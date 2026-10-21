@@ -38,7 +38,7 @@ type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   onClose: () => void;
   onLoadMore: () => void;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
-  onTyping: (typing: boolean) => void;
+  onTyping: (conversationId: string, parentId: string | null, typing: boolean) => void;
   onNotice: (message: string) => void;
 };
 

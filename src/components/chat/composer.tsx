@@ -58,7 +58,9 @@ type Props = {
   savedDraft?: string;
   onDraftChange?: (body: string) => void;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
-  onTyping: (typing: boolean) => void;
+  // Called with this composer's own conversation and thread, so a "stopped" sent on unmount reaches the
+  // place the user was typing in, not wherever the app has moved on to.
+  onTyping: (conversationId: string, parentId: string | null, typing: boolean) => void;
   onNotice: (message: string) => void;
 };
 
@@ -174,10 +176,10 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
       typingRef.current = false;
       lastTypingRef.current = 0;
     }
-    onTyping(typing);
+    onTyping(conversationId, parentId ?? null, typing);
   }
 
-  useEffect(() => () => { if (typingRef.current) onTyping(false); }, [onTyping]);
+  useEffect(() => () => { if (typingRef.current) onTyping(conversationId, parentId ?? null, false); }, [onTyping, conversationId, parentId]);
 
   function addFiles(files: FileList | File[]) {
     const list = [...files];

@@ -28,6 +28,8 @@ type Props = MessageActions & {
   me: ChatUser;
   canModerate: boolean;
   usersById: Map<string, ChatUser>;
+  // "Ana is replying…" while someone types in this message's thread (main list only).
+  replyTyping?: string | null;
   highlighted?: boolean;
 };
 
@@ -150,7 +152,7 @@ export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: C
   );
 }
 
-function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded }: Props) {
+function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded }: Props) {
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -245,10 +247,12 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
             })}
           </div>
         )}
-        {onOpenThread && message.replyCount > 0 && (
+        {onOpenThread && (message.replyCount > 0 || replyTyping) && (
           <button onClick={() => onOpenThread(message)} className="-ml-1.5 mt-1 flex items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-brand-600 transition hover:bg-white hover:ring-1 hover:ring-zinc-200">
-            <MessageSquareText size={14}/>{message.replyCount} {message.replyCount === 1 ? "reply" : "replies"}
-            {message.lastReplyAt && <span className="font-normal text-zinc-400">Last reply {dayLabel(message.lastReplyAt).toLowerCase()} at {timeLabel(message.lastReplyAt)}</span>}
+            <MessageSquareText size={14}/>{message.replyCount > 0 ? `${message.replyCount} ${message.replyCount === 1 ? "reply" : "replies"}` : "Thread"}
+            {replyTyping
+              ? <span aria-live="polite" className="font-normal italic text-zinc-500">{replyTyping}</span>
+              : message.lastReplyAt && <span className="font-normal text-zinc-400">Last reply {dayLabel(message.lastReplyAt).toLowerCase()} at {timeLabel(message.lastReplyAt)}</span>}
           </button>
         )}
       </div>
