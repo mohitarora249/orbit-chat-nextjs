@@ -1,7 +1,8 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Archive, AtSign, Bell, CheckCheck, ChevronDown, Compass, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
 } from "lucide-react";
@@ -86,11 +87,6 @@ export function ChatApp() {
 
   const socketRef = useRef<Socket | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  const topSentinelRef = useRef<HTMLDivElement | null>(null);
-  // Distance from the bottom of the scroller before older messages are prepended, so the view does not jump.
-  const prependAnchorRef = useRef<number | null>(null);
-  const atBottomRef = useRef(true);
   // Socket handlers and in-flight requests outlive renders, so they read current values from refs.
   const activeIdRef = useRef<string | null>(null);
   const threadIdRef = useRef<string | null>(null);
@@ -252,8 +248,6 @@ export function ChatApp() {
     try {
       const page = await fetchPage(conversationId, { cursor: history.nextCursor });
       if (activeIdRef.current !== conversationId) return;
-      const scroller = scrollRef.current;
-      prependAnchorRef.current = scroller ? scroller.scrollHeight - scroller.scrollTop : null;
       setHistory(current => ({
         messages: [...mergeMessages(page.messages, current.messages.filter(message => !isOptimistic(message))), ...current.messages.filter(isOptimistic)],
         nextCursor: page.nextCursor,
@@ -271,7 +265,6 @@ export function ChatApp() {
     if (!activeId) return;
     const controller = new AbortController();
     setHistory(emptyHistory);
-    atBottomRef.current = true;
     jumpPagesRef.current = 0;
     setUnreadMarker(bootstrapRef.current?.conversations.find(c => c.id === activeId)?.lastReadAt ?? null);
     void loadMessages(activeId, { signal: controller.signal });
@@ -288,34 +281,39 @@ export function ChatApp() {
     setDialog(current => current === "details" ? null : current);
   }, [bootstrap, activeId]);
 
-  // Infinite scroll: load the previous page when the top of the list comes into view.
-  const loadOlderRef = useRef(loadOlder);
-  loadOlderRef.current = loadOlder;
-  useEffect(() => {
-    const sentinel = topSentinelRef.current;
-    const root = scrollRef.current;
-    if (!sentinel || !root) return;
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) void loadOlderRef.current();
-    }, { root, rootMargin: "400px 0px 0px 0px" });
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-    // Re-observing after each page fires again if the top is still visible (e.g. short pages, tall screens).
-  }, [bootstrap !== null, history.loaded, history.nextCursor]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Only the rows near the viewport are mounted, so long channels stay smooth. Row 0 is the header (older-page
+  // spinner, channel intro); every other row is one message with its day divider, unread line and "Seen".
+  // Anchoring to the end keeps the reader's place when older pages are prepended or rows above resize, and
+  // follows new messages while the reader is at the bottom.
+  const getRowKey = useCallback((index: number) => index === 0 ? "header" : history.messages[index - 1].id, [history.messages]);
+  const virtualizer = useVirtualizer({
+    count: history.messages.length + 1,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: getRowKey,
+    estimateSize: index => index === 0 ? 0 : 64,
+    overscan: 8,
+    paddingStart: 24,
+    paddingEnd: 24,
+    anchorTo: "end",
+    followOnAppend: true,
+    scrollEndThreshold: 120
+  });
+  const virtualRows = virtualizer.getVirtualItems();
 
-  useLayoutEffect(() => {
+  // Infinite scroll: load the previous page when the header row is near the viewport. The live scrollTop check
+  // skips the first render of a page, whose range is computed before it is scrolled to the bottom.
+  const nearTop = virtualRows[0]?.index === 0;
+  useEffect(() => {
     const scroller = scrollRef.current;
-    if (prependAnchorRef.current === null || !scroller) return;
-    scroller.scrollTop = scroller.scrollHeight - prependAnchorRef.current;
-    prependAnchorRef.current = null;
-  }, [history.messages]);
+    if (nearTop && history.loaded && scroller && scroller.scrollTop < 400) void loadOlder();
+    // Runs again after each page, so short pages on tall screens keep loading until the view can scroll.
+  }, [nearTop, history.loaded, history.nextCursor]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Follow the bottom when a newer message arrives, but only if the reader is already there (or sent it).
+  // Messages I send jump to the bottom even when I had scrolled up.
   const lastMessage = history.messages[history.messages.length - 1];
-  useEffect(() => {
-    if (!lastMessage) return;
-    if (atBottomRef.current || lastMessage.authorId === me?.id) bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [lastMessage?.id, history.loaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    if (lastMessage && lastMessage.authorId === me?.id) virtualizer.scrollToEnd();
+  }, [lastMessage?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Read state ----------------------------------------------------------------------------------------
 
@@ -576,7 +574,6 @@ export function ChatApp() {
       if (parentId) setThread(current => current?.parentId === parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
       else if (activeIdRef.current === conversationId) setHistory(current => ({ ...current, messages: upsertMessage(current.messages, message) }));
     };
-    atBottomRef.current = true;
     place(optimistic);
     try {
       const { message } = await api<{ message: ChatMessage }>(`/api/conversations/${conversationId}/messages`, {
@@ -798,10 +795,9 @@ export function ChatApp() {
   // Scroll a jumped-to message into view, paging back through history if it is older than what is loaded.
   useEffect(() => {
     if (!highlightId || !history.loaded) return;
-    const element = document.getElementById(`message-${highlightId}`);
-    if (element) {
-      element.scrollIntoView({ block: "center" });
-      atBottomRef.current = false;
+    const index = history.messages.findIndex(message => message.id === highlightId);
+    if (index !== -1) {
+      virtualizer.scrollToIndex(index + 1, { align: "center" });
       const timer = setTimeout(() => setHighlightId(null), 4000);
       return () => clearTimeout(timer);
     }
@@ -810,7 +806,7 @@ export function ChatApp() {
       jumpPagesRef.current += 1;
       void loadOlder();
     }
-  }, [highlightId, history, thread, loadingOlder, loadOlder]);
+  }, [highlightId, history, thread, loadingOlder, loadOlder, virtualizer]);
 
   async function signOut() {
     socketRef.current?.disconnect();
@@ -917,6 +913,59 @@ export function ChatApp() {
       if (!isOptimistic(message) && message.createdAt <= partnerReadAt) { seenId = message.id; break; }
     }
   }
+  const historyHeader = (
+    <>
+      {loadingOlder && <div className="flex justify-center py-3 text-zinc-300"><Loader2 size={16} className="animate-spin"/></div>}
+      {!history.loaded && (
+        <div aria-label="Loading messages" className="space-y-6 px-2 py-4">
+          {[72, 48, 64].map(width => (
+            <div key={width} className="flex animate-pulse gap-3">
+              <div className="h-9 w-9 rounded-[10px] bg-zinc-100"/>
+              <div className="flex-1 space-y-2 pt-1"><div className="h-3 w-28 rounded bg-zinc-100"/><div className="h-3 rounded bg-zinc-100" style={{ width: `${width}%` }}/></div>
+            </div>
+          ))}
+        </div>
+      )}
+      {history.loaded && !history.nextCursor && activeConversation && (
+        <div className="mb-8 px-2 pt-6">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-zinc-100 text-zinc-500">
+            {activePartner ? <Avatar name={activePartner.displayName} color={activePartner.avatarColor} size="lg"/> : activeConversation.isPrivate ? <Lock size={20}/> : <Hash size={22}/>}
+          </div>
+          <h2 className="mt-4 text-xl font-semibold tracking-tight">{activePartner ? activeLabel : `#${activeLabel}`}</h2>
+          <p className="mt-1 max-w-prose text-sm text-zinc-500">
+            {activePartner
+              ? activePartner.id === me.id ? "This is your space. Draft messages, keep notes or park links here." : `This is the beginning of your direct message history with ${activeLabel}.`
+              : activeConversation.description || activeConversation.topic || `This is the very beginning of the #${activeLabel} channel.`}
+          </p>
+        </div>
+      )}
+      {history.loaded && history.messages.length === 0 && <p className="px-2 text-sm text-zinc-400">No messages yet. Say hello below.</p>}
+    </>
+  );
+  const messageRow = (index: number) => {
+    const message = history.messages[index];
+    const previous = history.messages[index - 1];
+    const newDay = !previous || dayLabel(previous.createdAt) !== dayLabel(message.createdAt);
+    const showUnread = firstUnread?.id === message.id;
+    return (
+      <>
+        {newDay && (
+          <div className="my-3 flex items-center gap-3">
+            <div className="h-px flex-1 bg-zinc-100"/>
+            <span className="rounded-full border border-zinc-200/80 bg-card px-2.5 py-0.5 text-[11px] font-medium text-zinc-500">{dayLabel(message.createdAt)}</span>
+            <div className="h-px flex-1 bg-zinc-100"/>
+          </div>
+        )}
+        {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
+        <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
+          highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
+          replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} openForwarded={openForwarded}/>
+        {seenId === message.id && (
+          <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
+        )}
+      </>
+    );
+  };
   const countLabel = (count: number) => count >= 100 ? "99+" : count;
   const mentionBadge = (count: number) => (
     <span title={`${count} unread ${count === 1 ? "mention" : "mentions"} of you`} className="ml-auto flex items-center gap-0.5 rounded-md bg-amber-400 px-1.5 py-px text-[11px] font-semibold tabular-nums text-amber-950">
@@ -1096,58 +1145,17 @@ export function ChatApp() {
           </div>
         )}
 
-        <div ref={scrollRef} onScroll={event => { const el = event.currentTarget; atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120; }} className="flex-1 overflow-y-auto px-3 py-6 sm:px-5">
-          <div className="mx-auto max-w-3xl">
-            <div ref={topSentinelRef}/>
-            {loadingOlder && <div className="flex justify-center py-3 text-zinc-300"><Loader2 size={16} className="animate-spin"/></div>}
-            {!history.loaded && (
-              <div aria-label="Loading messages" className="space-y-6 px-2 py-4">
-                {[72, 48, 64].map(width => (
-                  <div key={width} className="flex animate-pulse gap-3">
-                    <div className="h-9 w-9 rounded-[10px] bg-zinc-100"/>
-                    <div className="flex-1 space-y-2 pt-1"><div className="h-3 w-28 rounded bg-zinc-100"/><div className="h-3 rounded bg-zinc-100" style={{ width: `${width}%` }}/></div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {history.loaded && !history.nextCursor && activeConversation && (
-              <div className="mb-8 px-2 pt-6">
-                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-zinc-100 text-zinc-500">
-                  {activePartner ? <Avatar name={activePartner.displayName} color={activePartner.avatarColor} size="lg"/> : activeConversation.isPrivate ? <Lock size={20}/> : <Hash size={22}/>}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 sm:px-5">
+          <div className="relative mx-auto max-w-3xl" style={{ height: virtualizer.getTotalSize() }}>
+            {/* Rows stay in normal flow inside one translated wrapper, so hover toolbars can overlap neighbours. */}
+            <div className="absolute inset-x-0 top-0" style={{ transform: `translateY(${virtualRows[0]?.start ?? 0}px)` }}>
+              {virtualRows.map(row => (
+                // flow-root keeps the rows' margins inside them, so measured heights match the layout.
+                <div key={row.key} data-index={row.index} ref={virtualizer.measureElement} className="flow-root">
+                  {row.index === 0 ? historyHeader : messageRow(row.index - 1)}
                 </div>
-                <h2 className="mt-4 text-xl font-semibold tracking-tight">{activePartner ? activeLabel : `#${activeLabel}`}</h2>
-                <p className="mt-1 max-w-prose text-sm text-zinc-500">
-                  {activePartner
-                    ? activePartner.id === me.id ? "This is your space. Draft messages, keep notes or park links here." : `This is the beginning of your direct message history with ${activeLabel}.`
-                    : activeConversation.description || activeConversation.topic || `This is the very beginning of the #${activeLabel} channel.`}
-                </p>
-              </div>
-            )}
-            {history.messages.map((message, index) => {
-              const previous = history.messages[index - 1];
-              const newDay = !previous || dayLabel(previous.createdAt) !== dayLabel(message.createdAt);
-              const showUnread = firstUnread?.id === message.id;
-              return (
-                <Fragment key={message.id}>
-                  {newDay && (
-                    <div className="my-3 flex items-center gap-3">
-                      <div className="h-px flex-1 bg-zinc-100"/>
-                      <span className="rounded-full border border-zinc-200/80 bg-card px-2.5 py-0.5 text-[11px] font-medium text-zinc-500">{dayLabel(message.createdAt)}</span>
-                      <div className="h-px flex-1 bg-zinc-100"/>
-                    </div>
-                  )}
-                  {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
-                  <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
-                    highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
-                    replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} openForwarded={openForwarded}/>
-                  {seenId === message.id && (
-                    <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
-                  )}
-                </Fragment>
-              );
-            })}
-            {history.loaded && history.messages.length === 0 && <p className="px-2 text-sm text-zinc-400">No messages yet. Say hello below.</p>}
-            <div ref={bottomRef}/>
+              ))}
+            </div>
           </div>
         </div>
 

@@ -9,7 +9,7 @@ A web-only team chat starter using **Next.js App Router, Next.js Route Handlers,
 - **Authentication:** Better Auth email + password sessions. Sign-ups join the default workspace (`DEFAULT_WORKSPACE_SLUG`); the first sign-up on an empty database creates it.
 - **Channels:** public and private channels (`+` next to Channels, or the workspace menu). Names are normalized and unique per workspace.
 - **Direct messages:** click anyone in the sidebar, the People panel or ⌘K. One DM per pair, enforced by a unique key.
-- **History paging:** opaque cursors and infinite scroll upwards; reconnects catch up from the newest page.
+- **History paging:** opaque cursors and infinite scroll upwards; reconnects catch up from the newest page. The message list is virtualized (TanStack Virtual), so only rows near the viewport are mounted however long the channel gets.
 - **Search:** PostgreSQL full-text search (generated `tsvector` column + GIN index) with the permission filter in the SQL itself. Supports `"phrases"`, `OR` and `-exclude`.
 - **Reactions, editing and deleting:** reactions with an emoji picker; authors can edit or delete their messages, and workspace owners/admins can delete anyone's. Deleted messages become tombstones.
 - **Threads:** one level deep, with reply counts and a thread side panel.
