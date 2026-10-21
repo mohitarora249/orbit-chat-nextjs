@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { getPrimaryWorkspaceLink } from "@/lib/workspace";
-import { listConversations, listPinnedConversationIds } from "@/lib/conversations";
+import { listConversations, listDrafts, listPinnedConversationIds } from "@/lib/conversations";
 import { jsonError, routeError } from "@/lib/http";
 import { serializeStatus, statusSelect } from "@/lib/presence";
 import type { Bootstrap } from "@/lib/types";
@@ -15,14 +15,15 @@ export async function GET(request: NextRequest) {
     if (error) return error;
     const workspaceLink = await getPrimaryWorkspaceLink(user.id);
     if (!workspaceLink) return jsonError("You are not a member of any workspace.", 403);
-    const [members, conversations, pinnedConversationIds] = await Promise.all([
+    const [members, conversations, pinnedConversationIds, drafts] = await Promise.all([
       prisma.workspaceMember.findMany({
         where: { workspaceId: workspaceLink.workspaceId },
         orderBy: [{ user: { displayName: "asc" } }, { userId: "asc" }],
         select: { user: { select: { id: true, displayName: true, avatarColor: true, ...statusSelect } } }
       }),
       listConversations(user.id, workspaceLink.workspaceId),
-      listPinnedConversationIds(user.id, workspaceLink.workspaceId)
+      listPinnedConversationIds(user.id, workspaceLink.workspaceId),
+      listDrafts(user.id, workspaceLink.workspaceId)
     ]);
     const body: Bootstrap = {
       me: { id: user.id, displayName: user.displayName, avatarColor: user.avatarColor, email: user.email },
@@ -33,7 +34,8 @@ export async function GET(request: NextRequest) {
       })),
       workspace: { id: workspaceLink.workspace.id, name: workspaceLink.workspace.name, slug: workspaceLink.workspace.slug, role: workspaceLink.role },
       conversations,
-      pinnedConversationIds
+      pinnedConversationIds,
+      drafts
     };
     return NextResponse.json(body);
   } catch (error) {

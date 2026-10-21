@@ -1,7 +1,7 @@
 import type { Server } from "socket.io";
 import { prisma } from "./prisma";
 import { messageSelect, serializeMessage } from "./messages";
-import { getConversationSummary, listPinnedConversationIds } from "./conversations";
+import { getConversationSummary, listPinnedConversationIds, serializeDraft } from "./conversations";
 import { outboxSignal, type OutboxEventType, type OutboxPayloads } from "./outbox";
 import { serializeStatus, statusSelect } from "./presence";
 import { deleteObject, openObject } from "./storage";
@@ -70,6 +70,11 @@ function createHandlers(io: Server): Handlers {
     "conversation.pins": async ({ userId }) => {
       io.to(`user:${userId}`).emit("pins:update", { conversationIds: await listPinnedConversationIds(userId) });
     },
+    // Like pins: sends the draft as it is now, not as it was when the event was written.
+    "conversation.draft": async ({ userId, conversationId }) => {
+      const draft = await prisma.draft.findUnique({ where: { userId_conversationId: { userId, conversationId } }, select: { body: true, updatedAt: true } });
+      io.to(`user:${userId}`).emit("draft:update", { conversationId, draft: draft && serializeDraft(draft) });
+    },
     "user.status": async ({ userId }) => {
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { ...statusSelect, workspaceLinks: { select: { workspaceId: true } } } });
       if (!user) return;
@@ -126,7 +131,7 @@ export function startOutboxWorker(io: Server) {
   const handlers = createHandlers(io);
   const lanes: Lane[] = [
     // Realtime fan-out is fast and ordering matters, so it runs one event at a time.
-    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.read", "user.status", "conversation.pins"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
+    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.read", "user.status", "conversation.pins", "conversation.draft"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
     // Scans are slow; keep them off the realtime lane so they never delay message delivery.
     { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 },
     // Link previews wait on other people's servers (up to 5 seconds per link), so they get their own lane too.

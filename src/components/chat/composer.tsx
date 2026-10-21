@@ -1,12 +1,12 @@
 "use client";
 
-import { ClipboardEvent, DragEvent, Fragment, FormEvent, KeyboardEvent, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ClipboardEvent, DragEvent, Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { ArrowUp, AtSign, Loader2, Megaphone, Paperclip, Smile, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { api } from "@/lib/api";
-import { encodeMentions, mentionTargets, type BroadcastMention } from "@/lib/mentions";
+import { encodeMentions, mentionsToText, mentionTargets, parseMentions, type BroadcastMention } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ChatAttachment, ChatUser } from "@/lib/types";
 
@@ -15,6 +15,8 @@ const MAX_FILES = 10;
 const MAX_MENTION_SUGGESTIONS = 6;
 // Keys the suggestion list handles itself; caret moves from any other key re-check for an "@" query.
 const MENTION_KEYS = new Set(["Enter", "Tab", "ArrowUp", "ArrowDown", "Escape"]);
+// Drafts are saved this long after the last keystroke, and right away when the composer goes away.
+const DRAFT_SAVE_DELAY_MS = 800;
 
 type MentionQuery = { start: number; query: string };
 
@@ -51,6 +53,10 @@ type Props = {
   // Offer @channel and @here (channels only, not DMs).
   broadcastMentions?: boolean;
   autoFocus?: boolean;
+  // Unsent text saved for this conversation (mentions as <@id> tokens), and where to save changes to it.
+  // Attachments are not part of a draft.
+  savedDraft?: string;
+  onDraftChange?: (body: string) => void;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
   onTyping: (typing: boolean) => void;
   onNotice: (message: string) => void;
@@ -69,8 +75,17 @@ async function uploadFile(conversationId: string, file: File) {
   return done.attachment;
 }
 
-export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, broadcastMentions, onSend, onTyping, onNotice }: Props) {
-  const [draft, setDraft] = useState("");
+// A saved draft as the composer shows it: names instead of <@id> tokens, with those people already picked.
+// Tokens for people who cannot be mentioned here stay as they are, so saving again keeps them.
+function decodeDraft(body: string, mentionable: ChatUser[]) {
+  const byId = new Map(mentionable.map(user => [user.id, user]));
+  const picked = parseMentions(body).flatMap(part => typeof part !== "string" && part.kind === "user" ? byId.get(part.userId) ?? [] : []);
+  return { text: mentionsToText(body, id => byId.get(id)?.displayName, null), picked: [...new Set(picked)] };
+}
+
+export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, broadcastMentions, savedDraft = "", onDraftChange, onSend, onTyping, onNotice }: Props) {
+  const [initial] = useState(() => decodeDraft(savedDraft, mentionable));
+  const [draft, setDraft] = useState(initial.text);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [sending, setSending] = useState(false);
   const [picker, setPicker] = useState(false);
@@ -78,15 +93,19 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
   const [mentionIndex, setMentionIndex] = useState(0);
   // People chosen from the suggestions. The draft shows their names; on send, those names become <@id>
   // tokens, and a chosen person wins over someone else with the same name.
-  const [picked, setPicked] = useState<ChatUser[]>([]);
+  const [picked, setPicked] = useState<ChatUser[]>(initial.picked);
   const [dragging, setDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const listId = useId();
   const typingRef = useRef(false);
 
+  // The caret goes after any restored draft, ready to carry on typing.
   useEffect(() => {
-    if (autoFocus) textareaRef.current?.focus();
+    const textarea = textareaRef.current;
+    if (!autoFocus || !textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
   }, [autoFocus, conversationId, parentId]);
 
   // Where to put the caret after a programmatic edit (mention, emoji). Applied in the same commit as the new
@@ -106,6 +125,41 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
       textarea.setSelectionRange(caret, caret);
     }
   }, [draft]);
+
+  // Draft sync. `savedRef` is the body last saved or received; the local text differs from it only while
+  // a save is pending. Saves wait for a pause in typing; a pending save is flushed when the composer goes away.
+  const encode = (text: string, people: ChatUser[]) => encodeMentions(text, mentionTargets([...people, ...mentionable], Boolean(broadcastMentions)));
+  const encoded = encode(draft, picked);
+  const savedRef = useRef(savedDraft);
+  const encodedRef = useRef(encoded);
+  encodedRef.current = encoded;
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+  const saveDraft = useCallback((body: string) => {
+    if (body === savedRef.current) return;
+    savedRef.current = body;
+    onDraftChangeRef.current?.(body);
+  }, []);
+
+  useEffect(() => {
+    if (encoded === savedRef.current) return;
+    const timer = setTimeout(() => saveDraft(encoded), DRAFT_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [encoded, saveDraft]);
+
+  useEffect(() => () => saveDraft(encodedRef.current), [saveDraft]);
+
+  // The draft changed in another tab or device. Take it unless there are local edits not yet saved: those
+  // are newer, and saving them shortly overrides it.
+  useEffect(() => {
+    if (savedDraft === savedRef.current) return;
+    const dirty = encodedRef.current !== savedRef.current;
+    savedRef.current = savedDraft;
+    if (dirty) return;
+    const next = decodeDraft(savedDraft, mentionable);
+    setDraft(next.text);
+    setPicked(next.picked);
+  }, [savedDraft]); // eslint-disable-line react-hooks/exhaustive-deps -- a changed member list is not a new draft
 
   // "Typing" is re-announced every few seconds while the user keeps typing (peers expire it after ~6s);
   // "stopped" is sent once.
@@ -148,7 +202,7 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     // While suggestions are open, Enter picks a person; it must never send.
     if (!canSend || suggesting) return;
     const text = draft.trim();
-    const body = encodeMentions(text, mentionTargets([...picked, ...mentionable], Boolean(broadcastMentions)));
+    const body = encode(text, picked);
     const sentUploads = uploads;
     const sentPicked = picked;
     setSending(true);
@@ -156,6 +210,9 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     setUploads([]);
     setPicked([]);
     setTyping(false);
+    // Cleared now rather than after the usual delay, so a reload right after sending does not bring it back.
+    // A failed send puts the text back below, and that is saved again.
+    saveDraft("");
     const ok = await onSend(body, ready);
     if (!ok) {
       setDraft(text);

@@ -58,6 +58,7 @@ model User {
   accounts            Account[]
   attachments         Attachment[]
   pinnedConversations PinnedConversation[]
+  drafts              Draft[]
 }
 
 // Better Auth tables.
@@ -144,6 +145,7 @@ model Conversation {
   readCursors ReadCursor[]
   attachments Attachment[]
   pinnedBy    PinnedConversation[]
+  drafts      Draft[]
 
   @@unique([workspaceId, type, name])
 }
@@ -246,6 +248,20 @@ model PinnedConversation {
   userId         String
   conversationId String
   createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, conversationId])
+  @@index([conversationId])
+}
+
+// Unsent composer text for one conversation, so it survives switching channels, reloads and devices.
+// Personal, like pins. The body keeps mentions as <@id> tokens. An empty draft is deleted, not stored.
+model Draft {
+  userId         String
+  conversationId String
+  body           String
+  updatedAt      DateTime     @updatedAt
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 

@@ -40,6 +40,7 @@ attachments, link previews or forward), and `forwarded` (the quoted original of 
 | `conversation:read` | `{ conversationId, lastReadAt }` | The same user read a conversation (keeps tabs in sync) |
 | `presence:update` | `{ userId, presence }` (`"active"`, `"away"` or `"offline"`) | A user's socket connected, went idle or active, or disconnected (after a 5-second grace period). May repeat the current value |
 | `status:update` | `{ userId, status }` (`UserStatus` or `null`) | A user changed their custom status or Do Not Disturb (via the outbox). Expiry is not announced: clients hide statuses past `expiresAt` / `dndUntil` |
+| `draft:update` | `{ conversationId, draft }` (`{ body, updatedAt }` or `null`) | The same user's unsent text in a conversation changed or was cleared (keeps tabs in sync; never sent to anyone else). Carries the draft as stored when sent, so it may already be newer than the save that caused it |
 | `pins:update` | `{ conversationIds }` (full list, in pin order) | The same user pinned or unpinned a channel or DM (keeps tabs in sync; never sent to anyone else) |
 | `typing` | `{ conversationId, parentId, userId, displayName, typing }` | Another user is typing |
 | `chat:error` | `{ message }` | Room setup failed |

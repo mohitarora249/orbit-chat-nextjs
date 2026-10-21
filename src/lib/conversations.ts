@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { visibleConversationsWhere } from "./access";
 import { broadcastToken, userToken } from "./mentions";
-import type { ConversationSummary } from "./types";
+import type { ConversationSummary, Draft } from "./types";
 
 export const conversationSelect = {
   id: true,
@@ -95,4 +95,18 @@ export async function listPinnedConversationIds(userId: string, workspaceId?: st
     select: { conversationId: true }
   });
   return pins.map(pin => pin.conversationId);
+}
+
+// The user's drafts, by conversation id. Like pins, drafts in conversations the user can no longer see are
+// skipped, not deleted.
+export async function listDrafts(userId: string, workspaceId?: string) {
+  const drafts = await prisma.draft.findMany({
+    where: { userId, conversation: visibleConversationsWhere(userId, workspaceId) },
+    select: { conversationId: true, body: true, updatedAt: true }
+  });
+  return Object.fromEntries(drafts.map(draft => [draft.conversationId, serializeDraft(draft)])) as Record<string, Draft>;
+}
+
+export function serializeDraft(draft: { body: string; updatedAt: Date }): Draft {
+  return { body: draft.body, updatedAt: draft.updatedAt.toISOString() };
 }

@@ -89,7 +89,12 @@ export type Bootstrap = {
   conversations: ConversationSummary[];
   // Conversations the user pinned to the top of their sidebar, in pin order.
   pinnedConversationIds: string[];
+  // Unsent composer text, by conversation id.
+  drafts: Record<string, Draft>;
 };
+
+// Mentions in `body` are <@id> tokens, as in a message.
+export type Draft = { body: string; updatedAt: string };
 
 export type SearchHit = {
   message: ChatMessage;

@@ -10,6 +10,7 @@ export type OutboxPayloads = {
   "attachment.scan": { attachmentId: string };
   "user.status": { userId: string };
   "conversation.pins": { userId: string };
+  "conversation.draft": { userId: string; conversationId: string };
 };
 export type OutboxEventType = keyof OutboxPayloads;
 

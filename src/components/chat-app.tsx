@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import {
-  AtSign, Bell, ChevronDown, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pin, Plus, Search, Users, X
+  AtSign, Bell, ChevronDown, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Logo } from "@/components/ui/logo";
@@ -20,7 +20,7 @@ import { encodeMentions, mentionsMe, mentionsToText, mentionTargets } from "@/li
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
-import type { ActivityItem, Bootstrap, ChatAttachment, ChatForward, ChatMessage, ChatUser, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
+import type { ActivityItem, Bootstrap, ChatAttachment, ChatForward, ChatMessage, ChatUser, ConversationSummary, Draft, MessagePage, SearchHit } from "@/lib/types";
 
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
@@ -59,6 +59,8 @@ export function ChatApp() {
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   // Channels and DMs pinned to the top of the sidebar, in pin order (personal).
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+  // Unsent composer text by conversation id (personal, synced to the server).
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [dialog, setDialog] = useState<"palette" | "create" | "help" | null>(null);
   const [menu, setMenu] = useState<"workspace" | "notifications" | "status" | null>(null);
   // Other people's presence; ours is derived from the socket and `idle`.
@@ -91,6 +93,9 @@ export function ChatApp() {
   const idleRef = useRef(false);
   const lastMarkedRef = useRef("");
   const jumpPagesRef = useRef(0);
+  // Draft saves still in flight, by conversation. Their responses are applied in order; draft:update events
+  // for those conversations are ignored meanwhile, since they may describe an older save.
+  const draftSavesRef = useRef(new Map<string, { count: number; queue: Promise<void> }>());
   const jumpToRef = useRef<(conversationId: string, messageId: string, parentId: string | null) => void>(() => {});
   bootstrapRef.current = bootstrap;
   prefsRef.current = prefs;
@@ -129,6 +134,7 @@ export function ChatApp() {
       const data = await api<Bootstrap>("/api/bootstrap");
       setBootstrap(data);
       setPinnedIds(data.pinnedConversationIds);
+      setDrafts(data.drafts);
       setPrefs(readPrefs(data.me.id));
       let last: string | null = null;
       try { last = localStorage.getItem(`orbit-chat-last:${data.me.id}`); } catch { /* storage unavailable */ }
@@ -146,13 +152,49 @@ export function ChatApp() {
 
   const refreshConversations = useCallback(async () => {
     try {
-      const { conversations, pinnedConversationIds } = await api<{ conversations: ConversationSummary[]; pinnedConversationIds: string[] }>("/api/conversations");
+      const { conversations, pinnedConversationIds, drafts } = await api<{ conversations: ConversationSummary[]; pinnedConversationIds: string[]; drafts: Record<string, Draft> }>("/api/conversations");
       setBootstrap(current => current && { ...current, conversations });
       setPinnedIds(pinnedConversationIds);
+      // Drafts with a save in flight keep the local text; the save's response settles them.
+      setDrafts(current => {
+        const next = { ...drafts };
+        for (const id of draftSavesRef.current.keys()) {
+          if (current[id]) next[id] = current[id];
+          else delete next[id];
+        }
+        return next;
+      });
     } catch {
       // Keep the current list; the next reconnect or reload retries.
     }
   }, []);
+
+  const setDraft = useCallback((conversationId: string, draft: Draft | null) => {
+    setDrafts(current => {
+      const { [conversationId]: _previous, ...rest } = current;
+      return draft ? { ...rest, [conversationId]: draft } : rest;
+    });
+  }, []);
+
+  // Shown locally at once; saves for one conversation go out one at a time, so the last one typed wins.
+  const saveDraft = useCallback((conversationId: string, body: string) => {
+    setDraft(conversationId, body.trim() ? { body, updatedAt: new Date().toISOString() } : null);
+    const saves = draftSavesRef.current;
+    const entry = saves.get(conversationId) ?? { count: 0, queue: Promise.resolve() };
+    entry.count += 1;
+    entry.queue = entry.queue.then(async () => {
+      try {
+        const { draft } = await api<{ draft: Draft | null }>(`/api/conversations/${conversationId}/draft`, { method: "PUT", json: { body } });
+        if (entry.count === 1) setDraft(conversationId, draft);
+      } catch {
+        // Keep the local copy: it is still in this tab, and the next edit saves it again.
+      } finally {
+        entry.count -= 1;
+        if (!entry.count) saves.delete(conversationId);
+      }
+    });
+    saves.set(conversationId, entry);
+  }, [setDraft]);
 
   const fetchPage = useCallback((conversationId: string, options: { cursor?: string | null; signal?: AbortSignal } = {}) => {
     const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
@@ -400,6 +442,10 @@ export function ChatApp() {
     socket.on("status:update", ({ userId, status }: { userId: string; status: UserStatus | null }) => setStatus(userId, status));
     // Pinning or unpinning a conversation in another tab or device.
     socket.on("pins:update", ({ conversationIds }: { conversationIds: string[] }) => setPinnedIds(conversationIds));
+    // A draft saved in another tab or device (or the echo of our own save).
+    socket.on("draft:update", ({ conversationId, draft }: { conversationId: string; draft: Draft | null }) => {
+      if (!draftSavesRef.current.has(conversationId)) setDraft(conversationId, draft);
+    });
     socket.on("typing", (event: { conversationId: string; parentId: string | null; userId: string; displayName: string; typing: boolean }) => {
       if (event.userId === meId) return;
       const key = typingKey(event.conversationId, event.parentId);
@@ -415,7 +461,7 @@ export function ChatApp() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, updateConversation, setStatus]);
+  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, updateConversation, setStatus, setDraft]);
 
   // Idle detection: no input in this tab for IDLE_AFTER_MS makes it idle. The server combines all of a
   // person's tabs, so they show as away only when every tab is idle.
@@ -791,6 +837,10 @@ export function ChatApp() {
     : conversation.unreadCount > 0 && (
       <span className={cn("ml-auto min-w-[20px] rounded-md px-1.5 py-px text-center text-[11px] font-semibold tabular-nums", muted ? "bg-zinc-200/70 text-zinc-500" : "bg-brand-600 text-white")}>{countLabel(conversation.unreadCount)}</span>
     );
+  // Unsent text shows in place of the unread count (the row is still bold), so it is not forgotten. Mentions still win.
+  const rowBadge = (conversation: ConversationSummary, muted: boolean) => drafts[conversation.id] && conversation.mentionCount === 0
+    ? <span title="Unsent draft" className="ml-auto flex items-center gap-1 text-[11px] font-medium text-zinc-400"><Pencil size={11}/>Draft</span>
+    : unreadBadge(conversation, muted);
   const navItem = (active: boolean, unread = false) => cn(
     "flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] transition duration-150",
     active ? "bg-white font-medium text-zinc-900 shadow-float ring-1 ring-zinc-200/70" : unread ? "font-semibold text-zinc-900 hover:bg-zinc-200/50" : "text-zinc-600 hover:bg-zinc-200/50 hover:text-zinc-900"
@@ -811,7 +861,7 @@ export function ChatApp() {
     return (
       <button key={item.id} onClick={() => openConversation(item.id)} className={cn(navItem(active, mentioned || (unread && !muted)), muted && !mentioned && !active && "opacity-60")}>
         <Icon size={item.isPrivate ? 13 : 15} className={active ? "text-brand-600" : "text-zinc-400"}/><span className="truncate">{item.name}</span>
-        {!active && unreadBadge(item, muted)}
+        {!active && rowBadge(item, muted)}
       </button>
     );
   };
@@ -824,7 +874,7 @@ export function ChatApp() {
         <Avatar name={user.displayName} color={user.avatarColor} size="sm" presence={presenceOf(user.id)} dnd={isDnd(statusOf(user.id), now)}/>
         <span className="truncate">{user.displayName}{user.id === me.id && <span className="font-normal text-zinc-400"> (you)</span>}</span>
         {statusEmoji(user.id)}
-        {dm && !active && unreadBadge(dm, prefs.muted.includes(dm.id))}
+        {dm && !active && rowBadge(dm, prefs.muted.includes(dm.id))}
       </button>
     );
   };
@@ -994,6 +1044,7 @@ export function ChatApp() {
             {activeConversation && (
               <Composer key={activeConversation.id} conversationId={activeConversation.id} placeholder={`Message ${activePartner ? activeLabel : `#${activeLabel}`}`}
                 typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={onChannelTyping} onNotice={setNotice}
+                savedDraft={drafts[activeConversation.id]?.body} onDraftChange={body => saveDraft(activeConversation.id, body)}
                 onSend={(body, attachments) => sendMessage(activeConversation.id, null, body, attachments)}/>
             )}
           </div>
