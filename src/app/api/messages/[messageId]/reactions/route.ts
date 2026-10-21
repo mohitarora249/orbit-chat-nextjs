@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { requireMessageAccess } from "@/lib/access";
+import { ARCHIVED_ERROR, requireMessageAccess } from "@/lib/access";
 import { messageSelect, serializeMessage } from "@/lib/messages";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
@@ -25,6 +25,7 @@ async function changeReaction(request: NextRequest, context: Context, op: "add" 
   const { emoji } = await parseJson(request, reactionSchema);
   const message = await requireMessageAccess(user.id, messageId);
   if (message.deletedAt) return jsonError("Message not found.", 404);
+  if (message.conversation.archivedAt) return jsonError(ARCHIVED_ERROR, 403);
 
   if (op === "add") {
     const distinct = await prisma.reaction.groupBy({ by: ["emoji"], where: { messageId } });

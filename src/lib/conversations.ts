@@ -1,8 +1,16 @@
 import { Prisma } from "@prisma/client";
+import { z } from "zod";
 import { prisma } from "./prisma";
 import { visibleConversationsWhere } from "./access";
 import { broadcastToken, userToken } from "./mentions";
-import type { ConversationSummary, Draft } from "./types";
+import type { ConversationDetails, ConversationSummary, Draft } from "./types";
+
+// Channel names are stored lowercase, without "#", with spaces turned into dashes.
+export const channelNameSchema = z.string().trim()
+  .transform(value => value.toLowerCase().replace(/^#/, "").replace(/\s+/g, "-"))
+  .pipe(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/, "Channel names may use lowercase letters, numbers, - and _ (max 80)."));
+export const MAX_TOPIC_LENGTH = 250;
+export const MAX_DESCRIPTION_LENGTH = 1000;
 
 export const conversationSelect = {
   id: true,
@@ -10,6 +18,9 @@ export const conversationSelect = {
   type: true,
   isPrivate: true,
   topic: true,
+  description: true,
+  archivedAt: true,
+  createdById: true,
   members: { select: { userId: true } },
   messages: {
     where: { deletedAt: null, parentId: null },
@@ -22,16 +33,28 @@ export const conversationSelect = {
 type SelectedConversation = Prisma.ConversationGetPayload<{ select: typeof conversationSelect }>;
 type ReadState = { unreadCount: number; mentionCount: number; lastReadAt: Date | null };
 
-export function serializeConversation(conversation: SelectedConversation, read?: ReadState, readCursors?: Record<string, string>): ConversationSummary {
-  const last = conversation.messages[0];
+export function serializeDetails(conversation: Omit<SelectedConversation, "messages" | "createdById">): ConversationDetails {
   return {
     id: conversation.id,
     name: conversation.name,
+    topic: conversation.topic,
+    description: conversation.description,
+    archivedAt: conversation.archivedAt?.toISOString() ?? null,
+    // Public channel membership lists can be large; GET /api/conversations/:id/members returns them on demand.
+    memberIds: conversation.type === "DM" || conversation.isPrivate ? conversation.members.map(member => member.userId) : [],
+    memberCount: conversation.members.length
+  };
+}
+
+// `isMember` is the viewer's: pass it per audience when broadcasting.
+export function serializeConversation(conversation: SelectedConversation, isMember: boolean, read?: ReadState, readCursors?: Record<string, string>): ConversationSummary {
+  const last = conversation.messages[0];
+  return {
+    ...serializeDetails(conversation),
     type: conversation.type,
     isPrivate: conversation.isPrivate,
-    topic: conversation.topic,
-    // Public channel membership lists can be large and are not needed by the client.
-    memberIds: conversation.type === "DM" || conversation.isPrivate ? conversation.members.map(member => member.userId) : [],
+    createdById: conversation.createdById,
+    isMember,
     unreadCount: read?.unreadCount ?? 0,
     mentionCount: read?.mentionCount ?? 0,
     lastReadAt: read?.lastReadAt?.toISOString() ?? null,
@@ -92,12 +115,13 @@ export async function listConversations(userId: string, workspaceId: string) {
   });
   const ids = conversations.map(conversation => conversation.id);
   const [reads, cursors] = await Promise.all([readState(userId, ids), dmReadCursors(ids.filter((_, index) => conversations[index].type === "DM"))]);
-  return conversations.map(conversation => serializeConversation(conversation, reads.get(conversation.id), cursors.get(conversation.id)));
+  return conversations.map(conversation => serializeConversation(
+    conversation, conversation.members.some(member => member.userId === userId), reads.get(conversation.id), cursors.get(conversation.id)
+  ));
 }
 
-export async function getConversationSummary(conversationId: string) {
-  const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { ...conversationSelect, workspaceId: true } });
-  return conversation ? { workspaceId: conversation.workspaceId, summary: serializeConversation(conversation) } : null;
+export function loadConversation(conversationId: string) {
+  return prisma.conversation.findUnique({ where: { id: conversationId }, select: { ...conversationSelect, workspaceId: true } });
 }
 
 // The user's pinned conversations, oldest pin first (the sidebar order). Pins of conversations the user can

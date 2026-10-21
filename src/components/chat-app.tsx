@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import {
-  AtSign, Bell, CheckCheck, ChevronDown, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
+  Archive, AtSign, Bell, CheckCheck, ChevronDown, Compass, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Logo } from "@/components/ui/logo";
@@ -13,6 +13,7 @@ import { MessageItem } from "@/components/chat/message-item";
 import { ActivityPanel, PeoplePanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
 import { CommandPalette, CreateChannelDialog, ForwardDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type ForwardTarget, type NotificationPrefs } from "@/components/chat/dialogs";
 import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
+import { BrowseChannelsDialog, ChannelDetailsDialog, channelPermissions, type ChannelTab } from "@/components/chat/channels";
 import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mergeMessages, upsertMessage } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
@@ -20,7 +21,7 @@ import { encodeMentions, mentionsMe, mentionsToText, mentionTargets } from "@/li
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
-import type { ActivityItem, Bootstrap, ChatAttachment, ChatForward, ChatMessage, ChatUser, ConversationSummary, Draft, MessagePage, SearchHit } from "@/lib/types";
+import type { ActivityItem, Bootstrap, ChannelMember, ChatAttachment, ChatForward, ChatMessage, ChatUser, ConversationDetails, ConversationSummary, Draft, MessagePage, SearchHit } from "@/lib/types";
 
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
@@ -37,6 +38,10 @@ const MAX_JUMP_PAGES = 10;
 const emptyHistory: History = { messages: [], nextCursor: null, loaded: false };
 
 const typingKey = (conversationId: string, parentId?: string | null) => `${conversationId}|${parentId ?? ""}`;
+
+// DMs, and channels the user has joined that are not archived. Other public channels can be browsed and
+// previewed, but do not show in the sidebar, count towards mentions or notify.
+const inSidebar = (conversation: ConversationSummary) => conversation.type === "DM" || (conversation.isMember && !conversation.archivedAt);
 
 function readPrefs(userId: string): NotificationPrefs {
   try {
@@ -61,7 +66,8 @@ export function ChatApp() {
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   // Unsent composer text by conversation id (personal, synced to the server).
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
-  const [dialog, setDialog] = useState<"palette" | "create" | "help" | null>(null);
+  const [dialog, setDialog] = useState<"palette" | "create" | "help" | "browse" | "details" | null>(null);
+  const [detailsTab, setDetailsTab] = useState<ChannelTab>("about");
   const [menu, setMenu] = useState<"workspace" | "notifications" | "status" | null>(null);
   // Other people's presence; ours is derived from the socket and `idle`.
   const [presence, setPresence] = useState<Record<string, Presence>>({});
@@ -110,6 +116,15 @@ export function ChatApp() {
 
   const updateConversation = useCallback((id: string, update: (conversation: ConversationSummary) => ConversationSummary) => {
     setBootstrap(current => current && { ...current, conversations: current.conversations.map(c => c.id === id ? update(c) : c) });
+  }, []);
+
+  const applyDetails = useCallback((details: Partial<ConversationDetails> & { id: string }) => {
+    updateConversation(details.id, conversation => ({ ...conversation, ...details }));
+  }, [updateConversation]);
+
+  // Left or removed from a private channel: it is gone. The effect below moves off it if it was open.
+  const removeConversation = useCallback((id: string) => {
+    setBootstrap(current => current && { ...current, conversations: current.conversations.filter(c => c.id !== id) });
   }, []);
 
   const addConversation = useCallback((conversation: ConversationSummary) => {
@@ -264,6 +279,15 @@ export function ChatApp() {
     return () => controller.abort();
   }, [activeId, loadMessages]);
 
+  // The open conversation can disappear (removed from a private channel, here or in another tab).
+  useEffect(() => {
+    if (!bootstrap || !activeId || bootstrap.conversations.some(c => c.id === activeId)) return;
+    setActiveId(bootstrap.conversations.find(c => c.type === "CHANNEL" && inSidebar(c))?.id ?? bootstrap.conversations[0]?.id ?? null);
+    setThread(null);
+    setRightPanel(current => current === "thread" ? null : current);
+    setDialog(current => current === "details" ? null : current);
+  }, [bootstrap, activeId]);
+
   // Infinite scroll: load the previous page when the top of the list comes into view.
   const loadOlderRef = useRef(loadOlder);
   loadOlderRef.current = loadOlder;
@@ -340,6 +364,7 @@ export function ChatApp() {
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && message.conversationId === activeIdRef.current) return;
     const conversation = state.conversations.find(c => c.id === message.conversationId);
+    if (conversation && !inSidebar(conversation)) return;
     if (!mentionsMe(message.body, state.me.id) && conversation?.type !== "DM") return;
     const where = conversation?.type === "DM" ? "" : ` in #${conversation?.name ?? "a channel"}`;
     const body = mentionsToText(message.body, id => state.users.find(user => user.id === id)?.displayName);
@@ -359,7 +384,9 @@ export function ChatApp() {
       const { [message.authorId]: _removed, ...rest } = current[key];
       return { ...current, [key]: rest };
     });
-    const fromOther = Boolean(state) && message.authorId !== state?.me.id;
+    const conversation = state?.conversations.find(c => c.id === message.conversationId);
+    // Public channels the user has not joined (or archived ones) stay quiet; they still update if open.
+    const fromOther = Boolean(state) && message.authorId !== state?.me.id && (!conversation || inSidebar(conversation));
     // Any mention alerts live. @here only reaches people who are online and not away.
     const kind = fromOther ? mentionsMe(message.body, state!.me.id) : null;
     const mention = kind === "here" && idleRef.current ? null : kind;
@@ -384,13 +411,11 @@ export function ChatApp() {
       }));
     }
     if (mention && !seeing && !dnd && !message.id.startsWith("optimistic-")) {
-      const conversation = state?.conversations.find(c => c.id === message.conversationId);
       const where = conversation?.type === "DM" ? "a direct message" : `#${conversation?.name ?? "a channel"}`;
       setMentionToast({ message, kind: mention, where: message.parentId ? `a thread in ${where}` : where });
     }
     if (fromOther && !seeing && !dnd && !message.id.startsWith("optimistic-") && prefsRef.current.sound && !prefsRef.current.muted.includes(message.conversationId)) {
-      const isDm = state?.conversations.find(c => c.id === message.conversationId)?.type === "DM";
-      playSound(mention || isDm ? "mention" : "message");
+      playSound(mention || conversation?.type === "DM" ? "mention" : "message");
     }
     notify(message);
   }, [notify, updateConversation]);
@@ -433,6 +458,13 @@ export function ChatApp() {
     socket.on("message:new", handleNew);
     socket.on("message:updated", applyUpdated);
     socket.on("conversation:created", addConversation);
+    // Renamed, topic or description changed, archived or unarchived, or members joined or left.
+    socket.on("conversation:updated", applyDetails);
+    // The same user joined or left a public channel (here, in another tab, or was added or removed by someone).
+    socket.on("conversation:membership", ({ conversationId, isMember }: { conversationId: string; isMember: boolean }) => {
+      updateConversation(conversationId, c => ({ ...c, isMember }));
+    });
+    socket.on("conversation:removed", ({ conversationId }: { conversationId: string }) => removeConversation(conversationId));
     socket.on("conversation:read", ({ conversationId, lastReadAt }: { conversationId: string; lastReadAt: string }) => {
       updateConversation(conversationId, c => ({ ...c, unreadCount: 0, mentionCount: 0, lastReadAt: c.lastReadAt && c.lastReadAt > lastReadAt ? c.lastReadAt : lastReadAt }));
     });
@@ -468,7 +500,7 @@ export function ChatApp() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, updateConversation, setStatus, setDraft]);
+  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, applyDetails, removeConversation, updateConversation, setStatus, setDraft]);
 
   // Idle detection: no input in this tab for IDLE_AFTER_MS makes it idle. The server combines all of a
   // person's tabs, so they show as away only when every tab is idle.
@@ -592,6 +624,52 @@ export function ChatApp() {
       setPinnedIds(before);
       setNotice(error instanceof Error ? error.message : pin ? "Could not pin conversation." : "Could not unpin conversation.");
     }
+  }
+
+  async function joinChannel(conversationId: string) {
+    const myId = bootstrapRef.current?.me.id;
+    if (!myId) return false;
+    try {
+      const { members } = await api<{ members: ChannelMember[] }>(`/api/conversations/${conversationId}/members`, { method: "POST", json: { userIds: [myId] } });
+      updateConversation(conversationId, c => ({ ...c, isMember: true, memberCount: members.length }));
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not join channel.");
+      return false;
+    }
+  }
+
+  // A public channel stays open as a preview after leaving; a private one is gone.
+  async function leaveChannel(conversation: ConversationSummary) {
+    const myId = bootstrapRef.current?.me.id;
+    if (!myId) return false;
+    const warning = conversation.isPrivate ? " It's private: you'll need to be added back by a member to rejoin." : "";
+    if (!window.confirm(`Leave #${conversation.name}?${warning}`)) return false;
+    try {
+      await api(`/api/conversations/${conversation.id}/members/${myId}`, { method: "DELETE" });
+      if (conversation.isPrivate) removeConversation(conversation.id);
+      else updateConversation(conversation.id, c => ({ ...c, isMember: false, memberCount: Math.max(0, c.memberCount - 1) }));
+      setNotice(`You left #${conversation.name}.`);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not leave channel.");
+      return false;
+    }
+  }
+
+  async function unarchiveChannel(conversation: ConversationSummary) {
+    try {
+      const { conversation: details } = await api<{ conversation: ConversationDetails }>(`/api/conversations/${conversation.id}`, { method: "PATCH", json: { archived: false } });
+      applyDetails(details);
+      setNotice(`#${details.name} was unarchived.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not unarchive channel.");
+    }
+  }
+
+  function openDetails(tab: ChannelTab) {
+    setDetailsTab(tab);
+    setDialog("details");
   }
 
   const onEdit = useCallback(async (message: ChatMessage, body: string) => {
@@ -774,7 +852,7 @@ export function ChatApp() {
   }, [mentionToast]);
 
   // Unread mentions show in the tab title so they are noticed from other tabs too.
-  const totalMentions = bootstrap?.conversations.reduce((sum, c) => sum + c.mentionCount, 0) ?? 0;
+  const totalMentions = bootstrap?.conversations.reduce((sum, c) => sum + (inSidebar(c) ? c.mentionCount : 0), 0) ?? 0;
   useEffect(() => {
     document.title = totalMentions > 0 ? `(@${totalMentions}) Orbit Chat` : "Orbit Chat";
   }, [totalMentions]);
@@ -792,8 +870,8 @@ export function ChatApp() {
   const matchesFilter = (c: ConversationSummary) => c.type === "CHANNEL"
     ? c.name.includes(filter.toLowerCase().replace(/^#/, ""))
     : (usersById.get(dmPartnerId(c, me.id))?.displayName ?? "").toLowerCase().includes(filter.toLowerCase());
-  const pinnedConversations = pinnedIds.flatMap(id => bootstrap.conversations.find(c => c.id === id) ?? []).filter(matchesFilter);
-  const channels = bootstrap.conversations.filter(c => c.type === "CHANNEL" && !pinnedSet.has(c.id) && matchesFilter(c));
+  const pinnedConversations = pinnedIds.flatMap(id => bootstrap.conversations.find(c => c.id === id) ?? []).filter(c => inSidebar(c) && matchesFilter(c));
+  const channels = bootstrap.conversations.filter(c => c.type === "CHANNEL" && inSidebar(c) && !pinnedSet.has(c.id) && matchesFilter(c));
   const dmByPartner = new Map(bootstrap.conversations.filter(c => c.type === "DM").map(c => [dmPartnerId(c, me.id), c]));
   const people = [...bootstrap.users]
     .filter(user => user.displayName.toLowerCase().includes(filter.toLowerCase()) && !pinnedSet.has(dmByPartner.get(user.id)?.id ?? ""))
@@ -801,6 +879,9 @@ export function ChatApp() {
   const activePinned = activeConversation !== null && pinnedSet.has(activeConversation.id);
   const activeLabel = activeConversation ? label(activeConversation) : "Choose a conversation";
   const activePartner = activeConversation?.type === "DM" ? usersById.get(dmPartnerId(activeConversation, me.id)) : undefined;
+  const activeChannel = activeConversation?.type === "CHANNEL" ? activeConversation : null;
+  const activePermissions = activeChannel ? channelPermissions(activeChannel, me.id, canModerate) : null;
+  const archivedNotice = activeChannel?.archivedAt ? `#${activeChannel.name} is archived, so it's read-only.` : null;
   // Public channels can mention anyone in the workspace; DMs and private channels only their members.
   const mentionable = bootstrap.users
     .filter(user => user.id !== me.id && (!activeConversation || (activeConversation.type === "CHANNEL" && !activeConversation.isPrivate) || activeConversation.memberIds.includes(user.id)))
@@ -929,10 +1010,16 @@ export function ChatApp() {
             </>
           )}
 
-          {sectionHeader("Channels", <button title="Create channel" aria-label="Create channel" onClick={() => setDialog("create")} className={iconAction}><Plus size={14}/></button>)}
+          {sectionHeader("Channels", (
+            <span className="flex items-center">
+              <button title="Browse channels" aria-label="Browse channels" onClick={() => setDialog("browse")} className={iconAction}><Compass size={14}/></button>
+              <button title="Create channel" aria-label="Create channel" onClick={() => setDialog("create")} className={iconAction}><Plus size={14}/></button>
+            </span>
+          ))}
           <div className="space-y-0.5">
             {channels.map(channelRow)}
-            {channels.length === 0 && <p className="px-2.5 py-1 text-xs text-zinc-400">{filter ? "No channels match." : pinnedConversations.some(c => c.type === "CHANNEL") ? "All your channels are pinned." : "No channels yet."}</p>}
+            {channels.length === 0 && <p className="px-2.5 py-1 text-xs text-zinc-400">{filter ? "No channels match." : pinnedConversations.some(c => c.type === "CHANNEL") ? "All your channels are pinned." : "You haven't joined any channels."}</p>}
+            {!filter && <button onClick={() => setDialog("browse")} className={cn(navItem(false), "text-zinc-500")}><Compass size={15} className="text-zinc-400"/>Browse channels</button>}
           </div>
 
           <div className="mt-6"/>
@@ -969,11 +1056,20 @@ export function ChatApp() {
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {activePartner ? <Avatar name={activePartner.displayName} color={activePartner.avatarColor} size="sm" presence={presenceOf(activePartner.id)} dnd={isDnd(statusOf(activePartner.id), now)}/>
               : activeConversation?.isPrivate ? <Lock size={15} className="shrink-0 text-zinc-400"/> : <Hash size={16} className="shrink-0 text-zinc-400"/>}
-            <h1 className="truncate text-[15px] font-semibold tracking-tight">{activeLabel}</h1>
+            {activeChannel
+              ? <button onClick={() => openDetails("about")} title="Channel details" className="flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 transition hover:bg-zinc-100">
+                  <h1 className="truncate text-[15px] font-semibold tracking-tight">{activeLabel}</h1><ChevronDown size={14} className="shrink-0 text-zinc-400"/>
+                </button>
+              : <h1 className="truncate text-[15px] font-semibold tracking-tight">{activeLabel}</h1>}
+            {activeChannel?.archivedAt && <span className="flex shrink-0 items-center gap-1 rounded-md bg-zinc-100 px-1.5 py-0.5 text-[11px] font-medium text-zinc-600"><Archive size={11}/>Archived</span>}
             <span className="hidden min-w-0 truncate border-l border-zinc-200 pl-2.5 text-[13px] text-zinc-400 sm:block">
               {activePartner
                 ? partnerLine(activePartner.id)
-                : activeConversation?.topic || (activeConversation?.isPrivate ? "Private channel" : "Channel")}
+                : activeChannel && (activeChannel.topic
+                  ? <button onClick={() => activePermissions?.canEditInfo ? openDetails("about") : undefined} title={activeChannel.topic} className="max-w-full truncate text-left">{activeChannel.topic}</button>
+                  : activePermissions?.canEditInfo
+                    ? <button onClick={() => openDetails("about")} className="transition hover:text-zinc-600">Add a topic</button>
+                    : activeChannel.isPrivate ? "Private channel" : "Channel")}
             </span>
             {!socketConnected && <span className="ml-1 flex shrink-0 items-center gap-1.5 rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500"/>Reconnecting</span>}
           </div>
@@ -986,7 +1082,9 @@ export function ChatApp() {
                 <Pin size={16} className={cn(activePinned && "fill-current")}/>
               </Button>
             )}
-            <Button variant="ghost" size="icon" title="People" aria-label="People" onClick={() => setRightPanel(current => current === "people" ? null : "people")} className={cn("h-8 w-8", rightPanel === "people" && "bg-zinc-100 text-zinc-900")}><Users size={16}/></Button>
+            {activeChannel
+              ? <Button variant="ghost" size="sm" title="Channel members" aria-label={`${activeChannel.memberCount} members`} onClick={() => openDetails("members")} className="h-8 gap-1.5 px-2 tabular-nums"><Users size={16}/>{activeChannel.memberCount}</Button>
+              : <Button variant="ghost" size="icon" title="People" aria-label="People" onClick={() => setRightPanel(current => current === "people" ? null : "people")} className={cn("h-8 w-8", rightPanel === "people" && "bg-zinc-100 text-zinc-900")}><Users size={16}/></Button>}
             {menu === "notifications" && <NotificationsMenu prefs={prefs} onChange={savePrefs} conversation={activeConversation} label={activeLabel} onClose={() => setMenu(null)}/>}
           </div>
         </header>
@@ -1021,7 +1119,7 @@ export function ChatApp() {
                 <p className="mt-1 max-w-prose text-sm text-zinc-500">
                   {activePartner
                     ? activePartner.id === me.id ? "This is your space. Draft messages, keep notes or park links here." : `This is the beginning of your direct message history with ${activeLabel}.`
-                    : activeConversation.topic || `This is the very beginning of the #${activeLabel} channel.`}
+                    : activeConversation.description || activeConversation.topic || `This is the very beginning of the #${activeLabel} channel.`}
                 </p>
               </div>
             )}
@@ -1041,7 +1139,7 @@ export function ChatApp() {
                   {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
                   <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
                     highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
-                    replyTyping={typingText(message.conversationId, message.id, "replying")} onForward={onForward} openForwarded={openForwarded}/>
+                    replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} openForwarded={openForwarded}/>
                   {seenId === message.id && (
                     <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
                   )}
@@ -1055,7 +1153,18 @@ export function ChatApp() {
 
         <div className="px-3 pb-2 sm:px-5 sm:pb-3">
           <div className="mx-auto max-w-3xl">
-            {activeConversation && (
+            {activeChannel?.archivedAt ? (
+              <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3 text-[13px] text-zinc-600">
+                <Archive size={15} className="text-zinc-400"/>You&apos;re viewing an archived channel. It&apos;s read-only.
+                {activePermissions?.canArchive && <Button size="sm" variant="outline" onClick={() => void unarchiveChannel(activeChannel)}>Unarchive</Button>}
+              </div>
+            ) : activeChannel && !activeChannel.isMember ? (
+              <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3 text-[13px] text-zinc-600">
+                <span>You&apos;re previewing <b className="font-semibold text-zinc-900">#{activeChannel.name}</b>.</span>
+                <Button size="sm" variant="outline" onClick={() => openDetails("about")}>Details</Button>
+                <Button size="sm" onClick={() => void joinChannel(activeChannel.id)}>Join channel</Button>
+              </div>
+            ) : activeConversation && (
               <Composer key={activeConversation.id} conversationId={activeConversation.id} placeholder={`Message ${activePartner ? activeLabel : `#${activeLabel}`}`}
                 typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={emitTyping} onNotice={setNotice}
                 savedDraft={drafts[activeConversation.id]?.body} onDraftChange={body => saveDraft(activeConversation.id, body)}
@@ -1069,7 +1178,7 @@ export function ChatApp() {
       {rightPanel === "thread" && thread && (
         <ThreadPanel thread={thread} conversationName={activePartner ? activeLabel : `#${activeLabel}`} me={me} canModerate={canModerate} usersById={usersById}
           typingText={typingText(thread.parent?.conversationId ?? activeId ?? "", thread.parentId)} highlightId={highlightId} mentionable={mentionable}
-          broadcastMentions={activeConversation?.type === "CHANNEL"} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
+          broadcastMentions={activeConversation?.type === "CHANNEL"} readOnlyNotice={archivedNotice ?? (activeChannel && !activeChannel.isMember ? `Join #${activeChannel.name} to reply.` : null)} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
           onSend={(body, attachments) => sendMessage(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, body, attachments)}
           onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} openForwarded={openForwarded}/>
       )}
@@ -1105,6 +1214,14 @@ export function ChatApp() {
         <CreateChannelDialog users={bootstrap.users} me={me} onClose={() => setDialog(null)} onCreated={conversation => { addConversation(conversation); setDialog(null); openConversation(conversation.id); }}/>
       )}
       {dialog === "help" && <HelpDialog onClose={() => setDialog(null)}/>}
+      {dialog === "browse" && (
+        <BrowseChannelsDialog conversations={bootstrap.conversations} onOpen={openConversation} onJoin={joinChannel} onCreate={() => setDialog("create")} onClose={() => setDialog(null)}/>
+      )}
+      {dialog === "details" && activeChannel && (
+        <ChannelDetailsDialog key={activeChannel.id} conversation={activeChannel} me={me} users={bootstrap.users} usersById={usersById} isWorkspaceAdmin={canModerate}
+          presenceOf={presenceOf} initialTab={detailsTab} onDetails={applyDetails} onJoin={() => joinChannel(activeChannel.id)} onLeave={() => leaveChannel(activeChannel)}
+          onOpenDm={userId => { setDialog(null); void openDm(userId); }} onNotice={setNotice} onClose={() => setDialog(null)}/>
+      )}
       {forwarding && (
         <ForwardDialog message={forwarding} conversations={bootstrap.conversations} users={bootstrap.users} me={me} usersById={usersById} label={label}
           onForward={(targets, comment) => forwardMessage(forwarding, targets, comment)} onClose={() => setForwarding(null)}/>

@@ -70,8 +70,16 @@ export type ConversationSummary = {
   type: "CHANNEL" | "DM";
   isPrivate: boolean;
   topic: string | null;
+  description: string | null;
+  // Archived channels are read-only and leave the sidebar; they can still be opened and unarchived.
+  archivedAt: string | null;
+  createdById: string | null;
   // Populated for DMs (and private channels) so the client can label them.
   memberIds: string[];
+  memberCount: number;
+  // Whether the viewer is a member. Public channels the viewer has not joined can be previewed, not shown in
+  // the sidebar. Per-viewer, so broadcasts set it for each audience (see conversation.created).
+  isMember: boolean;
   unreadCount: number;
   // Unread messages that @mention the viewer. From the server this counts top-level messages only; live
   // thread-reply mentions are added on the client until the conversation is opened.
@@ -82,6 +90,12 @@ export type ConversationSummary = {
   readCursors: Record<string, string>;
   lastMessage: { body: string; createdAt: string; author: { displayName: string } } | null;
 };
+
+// The shared part of a conversation, broadcast as `conversation:updated` when it is renamed, its topic or
+// description change, it is archived or unarchived, or its members change. Clients merge it into the summary.
+export type ConversationDetails = Pick<ConversationSummary, "id" | "name" | "topic" | "description" | "archivedAt" | "memberIds" | "memberCount">;
+
+export type ChannelMember = { userId: string; joinedAt: string };
 
 export type Bootstrap = {
   me: ChatUser & { email: string };

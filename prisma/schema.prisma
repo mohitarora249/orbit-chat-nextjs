@@ -130,6 +130,8 @@ model WorkspaceMember {
 
 // Channel names are stored normalized (lowercase). A DM's name is its sorted member ids joined by ":",
 // so the unique constraint also guarantees one DM per pair of people.
+// Membership of a public channel only decides whose sidebar shows it: any workspace member can read one.
+// An archived channel keeps its history and members but is read-only (see src/lib/access.ts).
 model Conversation {
   id          String               @id @default(cuid())
   workspaceId String
@@ -137,6 +139,8 @@ model Conversation {
   type        ConversationType     @default(CHANNEL)
   isPrivate   Boolean              @default(false)
   topic       String?
+  description String?
+  archivedAt  DateTime?
   createdById String?
   createdAt   DateTime             @default(now())
   workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

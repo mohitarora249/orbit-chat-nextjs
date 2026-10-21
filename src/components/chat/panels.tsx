@@ -35,6 +35,8 @@ type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   highlightId: string | null;
   mentionable: ChatUser[];
   broadcastMentions: boolean;
+  // Shown instead of the reply box when the channel is archived.
+  readOnlyNotice?: string | null;
   onClose: () => void;
   onLoadMore: () => void;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
@@ -42,7 +44,7 @@ type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   onNotice: (message: string) => void;
 };
 
-export function ThreadPanel({ thread, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, broadcastMentions, onClose, onLoadMore, onSend, onTyping, onNotice, ...actions }: ThreadPanelProps) {
+export function ThreadPanel({ thread, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, broadcastMentions, readOnlyNotice, onClose, onLoadMore, onSend, onTyping, onNotice, ...actions }: ThreadPanelProps) {
   const { parent, replies } = thread;
   return (
     <PanelShell title="Thread" subtitle={conversationName} onClose={onClose}>
@@ -51,12 +53,12 @@ export function ThreadPanel({ thread, conversationName, me, canModerate, usersBy
           <div className="flex justify-center py-10 text-zinc-400"><Loader2 className="animate-spin" size={20}/></div>
         ) : parent && (
           <>
-            <MessageItem message={parent} grouped={false} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === parent.id} {...actions}/>
+            <MessageItem message={parent} grouped={false} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === parent.id} readOnly={Boolean(readOnlyNotice)} {...actions}/>
             <div className="my-3 flex items-center gap-3 px-2 text-[11px] font-medium text-zinc-400">
               {parent.replyCount} {parent.replyCount === 1 ? "reply" : "replies"}<div className="h-px flex-1 bg-zinc-200"/>
             </div>
             {replies.map((reply, index) => (
-              <MessageItem key={reply.id} message={reply} grouped={isGrouped(reply, replies[index - 1])} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === reply.id} {...actions}/>
+              <MessageItem key={reply.id} message={reply} grouped={isGrouped(reply, replies[index - 1])} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === reply.id} readOnly={Boolean(readOnlyNotice)} {...actions}/>
             ))}
             {thread.nextCursor && (
               <button onClick={onLoadMore} disabled={thread.loading} className="mx-auto mt-3 block rounded-md border border-zinc-200 bg-card px-3 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 disabled:text-zinc-400">
@@ -66,7 +68,8 @@ export function ThreadPanel({ thread, conversationName, me, canModerate, usersBy
           </>
         )}
       </div>
-      {parent && !parent.deletedAt && (
+      {parent && !parent.deletedAt && readOnlyNotice && <p className="mx-4 mb-4 rounded-lg bg-zinc-50 px-3 py-2.5 text-center text-xs text-zinc-500">{readOnlyNotice}</p>}
+      {parent && !parent.deletedAt && !readOnlyNotice && (
         <div className="px-4 pb-4">
           <Composer key={thread.parentId} conversationId={parent.conversationId} parentId={parent.id} placeholder="Reply…" typingText={typingText} compact autoFocus mentionable={mentionable} broadcastMentions={broadcastMentions} onSend={onSend} onTyping={onTyping} onNotice={onNotice}/>
         </div>

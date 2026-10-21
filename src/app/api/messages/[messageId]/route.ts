@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { isWorkspaceAdmin, requireMessageAccess } from "@/lib/access";
+import { ARCHIVED_ERROR, isWorkspaceAdmin, requireMessageAccess } from "@/lib/access";
 import { messageSelect, serializeMessage, syncMessageLinks } from "@/lib/messages";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
@@ -28,6 +28,7 @@ export async function PATCH(request: NextRequest, context: Context) {
     if (loaded.error) return loaded.error;
     const { user, message } = loaded;
     if (message.authorId !== user.id) return jsonError("You can only edit your own messages.", 403);
+    if (message.conversation.archivedAt) return jsonError(ARCHIVED_ERROR, 403);
     const { body } = await parseJson(request, editSchema);
     if (!body && !message.forwardedFromId && !(await prisma.attachment.count({ where: { messageId: message.id } }))) {
       return jsonError("A message needs text or an attachment.", 400);

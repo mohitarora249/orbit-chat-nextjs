@@ -243,7 +243,8 @@ export function ForwardDialog({ message, conversations, users, me, usersById, la
   const options = useMemo(() => {
     const dmByPartner = new Map(conversations.filter(c => c.type === "DM").map(c => [c.memberIds.find(id => id !== me.id) ?? me.id, c]));
     return [
-      ...conversations.filter(c => c.type === "CHANNEL").sort((a, b) => a.name.localeCompare(b.name)).map(c => ({
+      // Only channels the user is in and can post to.
+      ...conversations.filter(c => c.type === "CHANNEL" && c.isMember && !c.archivedAt).sort((a, b) => a.name.localeCompare(b.name)).map(c => ({
         key: c.id, label: c.name, chip: `#${c.name}`, search: c.name, icon: c.isPrivate ? <Lock size={14}/> : <Hash size={14}/>, target: { kind: "conversation", id: c.id } as ForwardTarget
       })),
       ...[...users].sort((a, b) => Number(b.id === me.id) - Number(a.id === me.id) || a.displayName.localeCompare(b.displayName)).map(user => {

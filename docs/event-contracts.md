@@ -2,8 +2,10 @@
 
 The Socket.IO handshake is authenticated by the Better Auth session cookie. Clients never choose rooms:
 on connect the server joins each socket to `user:<id>`, `workspace:<id>` for each of the user's workspaces,
-and `conversation:<id>` for every conversation the user can see. When a conversation is created, the outbox
-worker adds the rooms for everyone who can see it.
+and `conversation:<id>` for every conversation the user can see (including public channels they have not
+joined, so a preview stays live). When a conversation is created, or someone is added to a private channel,
+the outbox worker adds the rooms for everyone who can now see it; removing someone from a private channel
+takes their sockets out of its room.
 
 ## Client -> server
 
@@ -37,7 +39,10 @@ attachments, link previews or forward), and `forwarded` (the quoted original of 
 | `session:ready` | none | After the server has joined the socket's rooms |
 | `message:new` | `ChatMessage` | A message or thread reply was created |
 | `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, a thread got a reply, an attachment scan finished, its link previews were fetched, or the original it forwards changed |
-| `conversation:created` | `ConversationSummary` | A channel or DM that the user can see was created |
+| `conversation:created` | `ConversationSummary` | A channel or DM that the user can see was created, or the user was added to a private channel. `isMember` is set for each recipient (members and everyone else get separate emits) |
+| `conversation:updated` | `ConversationDetails` (`{ id, name, topic, description, archivedAt, memberIds, memberCount }`) | A channel was renamed, its topic or description changed, it was archived or unarchived, or its members changed. Sent to the conversation's room; merge it into the summary |
+| `conversation:membership` | `{ conversationId, isMember }` | The same user joined, left, was added to or was removed from a public channel (sent to the user's own room only) |
+| `conversation:removed` | `{ conversationId }` | The same user left or was removed from a private channel and can no longer see it (sent to the user's own room only) |
 | `conversation:read` | `{ conversationId, lastReadAt }` | The same user read a conversation (keeps tabs in sync) |
 | `conversation:seen` | `{ conversationId, userId, lastReadAt }` | A member of a DM moved their read cursor (sent to the DM's room, so the other member can show "Seen"). Never sent for channels. May arrive out of order: keep the later `lastReadAt` |
 | `presence:update` | `{ userId, presence }` (`"active"`, `"away"` or `"offline"`) | A user's socket connected, went idle or active, or disconnected (after a 5-second grace period). May repeat the current value |

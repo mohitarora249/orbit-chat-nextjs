@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { accessErrors, getConversationAccess, requireMessageAccess } from "@/lib/access";
+import { accessErrors, assertNotArchived, getConversationAccess, requireMessageAccess } from "@/lib/access";
 import { cursorWhere, decodeCursor, encodeCursor, messageSelect, parseLimit, serializeMessage, syncMessageLinks } from "@/lib/messages";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
@@ -112,6 +112,7 @@ export async function POST(request: NextRequest, context: Context) {
 
     const access = await getConversationAccess(user.id, conversationId);
     if (access !== "ok") return jsonError(accessErrors[access].error, accessErrors[access].status);
+    await assertNotArchived(conversationId);
 
     const existing = await findExistingMessage(user.id, clientMessageId);
     if (existing) return replayResponse(existing, conversationId);

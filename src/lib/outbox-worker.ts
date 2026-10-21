@@ -1,7 +1,7 @@
 import type { Server } from "socket.io";
 import { prisma } from "./prisma";
 import { messageSelect, serializeMessage } from "./messages";
-import { getConversationSummary, listPinnedConversationIds, serializeDraft } from "./conversations";
+import { loadConversation, listPinnedConversationIds, serializeConversation, serializeDetails, serializeDraft } from "./conversations";
 import { outboxSignal, type OutboxEventType, type OutboxPayloads } from "./outbox";
 import { serializeStatus, statusSelect } from "./presence";
 import { deleteObject, openObject } from "./storage";
@@ -49,17 +49,41 @@ function createHandlers(io: Server): Handlers {
       if (await refreshPreviews(links.map(link => link.url))) await emitMessage(io, messageId, "message:updated");
     },
     "conversation.created": async ({ conversationId }) => {
-      const found = await getConversationSummary(conversationId);
-      if (!found) return;
+      const conversation = await loadConversation(conversationId);
+      if (!conversation) return;
       const room = `conversation:${conversationId}`;
-      const { summary, workspaceId } = found;
+      const memberRooms = conversation.members.map(member => `user:${member.userId}`);
       // Subscribe every connected socket that can now see the conversation, on every server instance.
-      const audiences = summary.type === "CHANNEL" && !summary.isPrivate
-        ? [`workspace:${workspaceId}`]
-        : summary.memberIds.map(userId => `user:${userId}`);
-      for (const audience of audiences) {
-        io.in(audience).socketsJoin(room);
-        io.to(audience).emit("conversation:created", summary);
+      // Members and everyone else get different `isMember` values, so they get separate emits.
+      io.in(memberRooms).socketsJoin(room);
+      io.to(memberRooms).emit("conversation:created", serializeConversation(conversation, true));
+      if (conversation.type === "CHANNEL" && !conversation.isPrivate) {
+        const workspaceRoom = `workspace:${conversation.workspaceId}`;
+        io.in(workspaceRoom).socketsJoin(room);
+        io.to(workspaceRoom).except(memberRooms).emit("conversation:created", serializeConversation(conversation, false));
+      }
+    },
+    "conversation.updated": async ({ conversationId }) => {
+      const conversation = await loadConversation(conversationId);
+      if (conversation) io.to(`conversation:${conversationId}`).emit("conversation:updated", serializeDetails(conversation));
+    },
+    // Reads membership as it is now, so a repeated or late event still leaves the user's tabs correct.
+    "conversation.membership": async ({ conversationId, userId }) => {
+      const conversation = await loadConversation(conversationId);
+      if (!conversation) return;
+      const room = `conversation:${conversationId}`;
+      const userRoom = `user:${userId}`;
+      const isMember = conversation.members.some(member => member.userId === userId);
+      if (!conversation.isPrivate) {
+        // Anyone in the workspace can read a public channel, so only the sidebar changes.
+        io.to(userRoom).emit("conversation:membership", { conversationId, isMember });
+      } else if (isMember) {
+        io.in(userRoom).socketsJoin(room);
+        io.to(userRoom).emit("conversation:created", serializeConversation(conversation, true));
+      } else {
+        // Removed from (or left) a private channel: they can no longer see it at all.
+        io.in(userRoom).socketsLeave(room);
+        io.to(userRoom).emit("conversation:removed", { conversationId });
       }
     },
     "conversation.read": async ({ conversationId, userId, lastReadAt }) => {
@@ -134,7 +158,7 @@ export function startOutboxWorker(io: Server) {
   const handlers = createHandlers(io);
   const lanes: Lane[] = [
     // Realtime fan-out is fast and ordering matters, so it runs one event at a time.
-    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.read", "user.status", "conversation.pins", "conversation.draft"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
+    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.updated", "conversation.membership", "conversation.read", "user.status", "conversation.pins", "conversation.draft"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
     // Scans are slow; keep them off the realtime lane so they never delay message delivery.
     { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 },
     // Link previews wait on other people's servers (up to 5 seconds per link), so they get their own lane too.

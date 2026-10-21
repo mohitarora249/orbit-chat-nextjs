@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
     const where = { workspaceId_type_name: { workspaceId, type: "DM" as const, name } };
 
     const existing = await prisma.conversation.findUnique({ where, select: conversationSelect });
-    if (existing) return NextResponse.json({ conversation: serializeConversation(existing) });
+    if (existing) return NextResponse.json({ conversation: serializeConversation(existing, true) });
 
     try {
       const conversation = await prisma.$transaction(async tx => {
@@ -43,11 +43,11 @@ export async function POST(request: NextRequest) {
         return created;
       });
       notifyOutbox();
-      return NextResponse.json({ conversation: serializeConversation(conversation) }, { status: 201 });
+      return NextResponse.json({ conversation: serializeConversation(conversation, true) }, { status: 201 });
     } catch (createError) {
       if (createError instanceof Prisma.PrismaClientKnownRequestError && createError.code === "P2002") {
         const winner = await prisma.conversation.findUnique({ where, select: conversationSelect });
-        if (winner) return NextResponse.json({ conversation: serializeConversation(winner) });
+        if (winner) return NextResponse.json({ conversation: serializeConversation(winner, true) });
       }
       throw createError;
     }

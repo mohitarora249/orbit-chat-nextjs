@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { getPrimaryWorkspaceLink } from "@/lib/workspace";
-import { conversationSelect, listConversations, listDrafts, listPinnedConversationIds, serializeConversation } from "@/lib/conversations";
+import { channelNameSchema, conversationSelect, listConversations, listDrafts, listPinnedConversationIds, MAX_TOPIC_LENGTH, serializeConversation } from "@/lib/conversations";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
 import { HttpError, jsonError, parseJson, routeError } from "@/lib/http";
 
@@ -30,10 +30,8 @@ export async function GET(request: NextRequest) {
 }
 
 const createChannelSchema = z.object({
-  name: z.string().trim()
-    .transform(value => value.toLowerCase().replace(/^#/, "").replace(/\s+/g, "-"))
-    .pipe(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/, "Channel names may use lowercase letters, numbers, - and _ (max 80).")),
-  topic: z.string().trim().max(250).optional(),
+  name: channelNameSchema,
+  topic: z.string().trim().max(MAX_TOPIC_LENGTH).optional(),
   isPrivate: z.boolean().default(false),
   memberIds: z.array(z.string().min(1)).max(500).default([])
 });
@@ -69,7 +67,7 @@ export async function POST(request: NextRequest) {
         return created;
       });
       notifyOutbox();
-      return NextResponse.json({ conversation: serializeConversation(conversation) }, { status: 201 });
+      return NextResponse.json({ conversation: serializeConversation(conversation, true) }, { status: 201 });
     } catch (createError) {
       if (createError instanceof Prisma.PrismaClientKnownRequestError && createError.code === "P2002") {
         throw new HttpError(409, `A channel named #${input.name} already exists.`);

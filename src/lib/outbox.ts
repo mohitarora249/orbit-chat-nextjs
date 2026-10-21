@@ -6,6 +6,10 @@ export type OutboxPayloads = {
   "message.updated": { messageId: string };
   "message.unfurl": { messageId: string };
   "conversation.created": { conversationId: string };
+  // Renamed, topic or description changed, archived or unarchived, or members changed.
+  "conversation.updated": { conversationId: string };
+  // `userId` joined, left, was added to or was removed from the channel.
+  "conversation.membership": { conversationId: string; userId: string };
   "conversation.read": { conversationId: string; userId: string; lastReadAt: string };
   "attachment.scan": { attachmentId: string };
   "user.status": { userId: string };

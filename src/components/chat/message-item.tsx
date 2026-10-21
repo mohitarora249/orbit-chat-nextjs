@@ -31,6 +31,8 @@ type Props = MessageActions & {
   // "Ana is replying…" while someone types in this message's thread (main list only).
   replyTyping?: string | null;
   highlighted?: boolean;
+  // In an archived channel: no reacting or editing (deleting is still allowed).
+  readOnly?: boolean;
 };
 
 // Links open in a new tab without telling the site where they came from. parseLinks only yields http(s) URLs.
@@ -152,7 +154,7 @@ export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: C
   );
 }
 
-function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded }: Props) {
+function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded }: Props) {
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -239,7 +241,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
             {message.reactions.map(reaction => {
               const reacted = reaction.userIds.includes(me.id);
               return (
-                <button key={reaction.emoji} onClick={() => onReact(message, reaction.emoji, !reacted)} title={`${reactionNames(reaction.userIds)} reacted with ${reaction.emoji}`}
+                <button key={reaction.emoji} disabled={readOnly} onClick={() => onReact(message, reaction.emoji, !reacted)} title={`${reactionNames(reaction.userIds)} reacted with ${reaction.emoji}`}
                   className={cn("flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs transition active:scale-95", reacted ? "border-brand-200 bg-brand-50 text-brand-700" : "border-zinc-200 bg-card text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50")}>
                   <span>{reaction.emoji}</span><span className="font-medium tabular-nums">{reaction.userIds.length}</span>
                 </button>
@@ -258,10 +260,10 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
       </div>
       {!pending && !deleted && !editing && (
         <div className={cn("absolute -top-4 right-2 z-10 items-center gap-0.5 rounded-lg border border-zinc-200/80 bg-card p-0.5 shadow-float", picker ? "flex" : "hidden group-hover:flex group-focus-within:flex")}>
-          <button title="Add reaction" aria-label="Add reaction" onClick={() => setPicker(true)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><SmilePlus size={15}/></button>
+          {!readOnly && <button title="Add reaction" aria-label="Add reaction" onClick={() => setPicker(true)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><SmilePlus size={15}/></button>}
           {onOpenThread && <button title="Reply in thread" aria-label="Reply in thread" onClick={() => onOpenThread(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><MessageSquareText size={15}/></button>}
           <button title="Forward message" aria-label="Forward message" onClick={() => onForward(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Forward size={15}/></button>
-          {mine && <button title="Edit message" aria-label="Edit message" onClick={startEdit} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
+          {mine && !readOnly && <button title="Edit message" aria-label="Edit message" onClick={startEdit} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
           {(mine || canModerate) && <button title="Delete message" aria-label="Delete message" onClick={() => onDelete(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14}/></button>}
           {picker && (
             <EmojiPicker className="right-0 top-8" onClose={() => setPicker(false)} onPick={emoji => {

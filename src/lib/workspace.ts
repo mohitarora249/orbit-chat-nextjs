@@ -2,8 +2,9 @@ import { prisma } from "./prisma";
 
 const DEFAULT_WORKSPACE_SLUG = process.env.DEFAULT_WORKSPACE_SLUG || "acme";
 
-// New sign-ups join the default workspace. If there is none yet, the first person to sign up creates it
-// (with a #general channel) and becomes its owner.
+// New sign-ups join the default workspace and its #general channel; other public channels they find with
+// "Browse channels". If there is no workspace yet, the first person to sign up creates it (with a #general
+// channel) and becomes its owner.
 export async function provisionNewUser(userId: string) {
   await prisma.$transaction(async tx => {
     const existing = await tx.workspace.findUnique({ where: { slug: DEFAULT_WORKSPACE_SLUG } });
@@ -13,6 +14,13 @@ export async function provisionNewUser(userId: string) {
         update: {},
         create: { workspaceId: existing.id, userId, role: "MEMBER" }
       });
+      const general = await tx.conversation.findUnique({
+        where: { workspaceId_type_name: { workspaceId: existing.id, type: "CHANNEL", name: "general" } },
+        select: { id: true, isPrivate: true, archivedAt: true }
+      });
+      if (general && !general.isPrivate && !general.archivedAt) {
+        await tx.conversationMember.createMany({ data: [{ conversationId: general.id, userId }], skipDuplicates: true });
+      }
       return;
     }
     const workspace = await tx.workspace.create({ data: { name: "Orbit", slug: DEFAULT_WORKSPACE_SLUG } });

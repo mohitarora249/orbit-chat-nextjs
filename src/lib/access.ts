@@ -41,7 +41,7 @@ export function visibleConversationsWhere(userId: string, workspaceId?: string):
 export async function requireMessageAccess(userId: string, messageId: string) {
   const message = await prisma.message.findUnique({
     where: { id: messageId },
-    select: { id: true, conversationId: true, authorId: true, parentId: true, forwardedFromId: true, deletedAt: true, conversation: { select: { workspaceId: true } } }
+    select: { id: true, conversationId: true, authorId: true, parentId: true, forwardedFromId: true, deletedAt: true, conversation: { select: { workspaceId: true, archivedAt: true } } }
   });
   if (!message) throw new HttpError(404, "Message not found.");
   const access = await getConversationAccess(userId, message.conversationId);
@@ -52,4 +52,29 @@ export async function requireMessageAccess(userId: string, messageId: string) {
 export async function isWorkspaceAdmin(userId: string, workspaceId: string) {
   const link = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId, userId } }, select: { role: true } });
   return link?.role === "OWNER" || link?.role === "ADMIN";
+}
+
+export const ARCHIVED_ERROR = "This channel is archived. Unarchive it to post or make changes.";
+
+// Archived channels are read-only: no new messages, replies, uploads, edits or reactions. Deleting a message
+// is still allowed, so moderators can clean one up.
+export async function assertNotArchived(conversationId: string) {
+  const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { archivedAt: true } });
+  if (conversation?.archivedAt) throw new HttpError(403, ARCHIVED_ERROR);
+}
+
+// Loads a channel the user can see, for the channel management routes, with what the user may do to it.
+// Members can set the topic and description and add people; the channel's creator and workspace owners and
+// admins can also rename, archive and remove people. DMs have none of this.
+export async function requireChannel(userId: string, conversationId: string) {
+  const access = await getConversationAccess(userId, conversationId);
+  if (access !== "ok") throw new HttpError(accessErrors[access].status, accessErrors[access].error);
+  const channel = await prisma.conversation.findUniqueOrThrow({
+    where: { id: conversationId },
+    select: { id: true, workspaceId: true, type: true, isPrivate: true, archivedAt: true, createdById: true, members: { where: { userId }, select: { id: true }, take: 1 } }
+  });
+  if (channel.type !== "CHANNEL") throw new HttpError(400, "Direct messages cannot be managed like channels.");
+  const isMember = channel.members.length > 0;
+  const canManage = channel.createdById === userId || (await isWorkspaceAdmin(userId, channel.workspaceId));
+  return { ...channel, isMember, canManage };
 }

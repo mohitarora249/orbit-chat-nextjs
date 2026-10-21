@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { accessErrors, getConversationAccess } from "@/lib/access";
+import { accessErrors, assertNotArchived, getConversationAccess } from "@/lib/access";
 import { requireUser } from "@/lib/session";
 import { MAX_ATTACHMENT_BYTES, presignUpload, storageConfigured } from "@/lib/storage";
 import { jsonError, parseJson, routeError } from "@/lib/http";
@@ -32,6 +32,7 @@ export async function POST(request: NextRequest, context: Context) {
     const input = await parseJson(request, uploadSchema);
     const access = await getConversationAccess(user.id, conversationId);
     if (access !== "ok") return jsonError(accessErrors[access].error, accessErrors[access].status);
+    await assertNotArchived(conversationId);
 
     const pending = await prisma.attachment.count({ where: { uploaderId: user.id, status: "PENDING_UPLOAD" } });
     if (pending >= MAX_PENDING_UPLOADS) return jsonError("Too many unfinished uploads. Try again shortly.", 429);
