@@ -108,7 +108,14 @@ export type Bootstrap = {
   pinnedConversationIds: string[];
   // Unsent composer text, by conversation id.
   drafts: Record<string, Draft>;
+  // The user's reminders that are not done yet (gone off or waiting), soonest first.
+  reminders: ChatReminder[];
 };
+
+export type Gif = { id: string; title: string; url: string; width: number; height: number };
+
+// A /remind reminder. `firedAt` is set once it has gone off, and cleared again by a snooze.
+export type ChatReminder = { id: string; text: string; remindAt: string; firedAt: string | null; conversationId: string | null };
 
 // Mentions in `body` are <@id> tokens, as in a message.
 export type Draft = { body: string; updatedAt: string };

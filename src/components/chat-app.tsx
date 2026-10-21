@@ -4,30 +4,34 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { io, Socket } from "socket.io-client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  Archive, AtSign, Bell, CheckCheck, ChevronDown, Compass, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
+  AlarmClock, Archive, AtSign, Bell, CheckCheck, ChevronDown, Compass, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Logo } from "@/components/ui/logo";
 import { Button } from "@/components/ui/button";
 import { Composer } from "@/components/chat/composer";
 import { MessageItem } from "@/components/chat/message-item";
-import { ActivityPanel, PeoplePanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
+import { ActivityPanel, PeoplePanel, RemindersPanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
 import { CommandPalette, CreateChannelDialog, ForwardDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type ForwardTarget, type NotificationPrefs } from "@/components/chat/dialogs";
 import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
 import { BrowseChannelsDialog, ChannelDetailsDialog, channelPermissions, type ChannelTab } from "@/components/chat/channels";
-import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mergeMessages, upsertMessage } from "@/components/chat/helpers";
+import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mergeMessages, timeLabel, upsertMessage } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
+import { parseReminder, parseStatus, reminderTimeLabel } from "@/lib/commands";
+import { isGifUrl } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets } from "@/lib/mentions";
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
-import type { ActivityItem, Bootstrap, ChannelMember, ChatAttachment, ChatForward, ChatMessage, ChatUser, ConversationDetails, ConversationSummary, Draft, MessagePage, SearchHit } from "@/lib/types";
+import type { ActivityItem, Bootstrap, ChannelMember, ChatAttachment, ChatForward, ChatMessage, ChatReminder, ChatUser, ConversationDetails, ConversationSummary, Draft, MessagePage, SearchHit } from "@/lib/types";
 
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
-type RightPanel = "thread" | "activity" | "people" | null;
+type RightPanel = "thread" | "activity" | "people" | "reminders" | null;
 type MentionToast = { message: ChatMessage; kind: NonNullable<ReturnType<typeof mentionsMe>>; where: string };
+// A message ↑ asked to edit, in the main list or the open thread (a thread's parent is in both).
+type EditRequest = { id: string; where: "main" | "thread" };
 
 const PAGE_SIZE = 50;
 const TYPING_TTL_MS = 6000;
@@ -36,9 +40,25 @@ const MENTION_TOAST_MS = 8000;
 const PRESENCE_TICK_MS = 30 * 1000;
 // When jumping to an old search result, give up after this many pages of history.
 const MAX_JUMP_PAGES = 10;
+const SNOOZE_MS = 20 * 60 * 1000;
 const emptyHistory: History = { messages: [], nextCursor: null, loaded: false };
 
 const typingKey = (conversationId: string, parentId?: string | null) => `${conversationId}|${parentId ?? ""}`;
+
+// Adds, replaces (reminder) or removes (null) a reminder, keeping the list soonest first.
+function upsertReminder(list: ChatReminder[], reminderId: string, reminder: ChatReminder | null) {
+  const rest = list.filter(item => item.id !== reminderId);
+  return reminder ? [...rest, reminder].sort((a, b) => a.remindAt.localeCompare(b.remindAt) || a.id.localeCompare(b.id)) : rest;
+}
+
+// The newest of my messages that ↑ can edit: not pending, deleted or a GIF.
+function lastEditable(messages: ChatMessage[], meId: string) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.authorId === meId && !message.deletedAt && !isOptimistic(message) && !isGifUrl(message.body)) return i;
+  }
+  return -1;
+}
 
 // DMs, and channels the user has joined that are not archived. Other public channels can be browsed and
 // previewed, but do not show in the sidebar, count towards mentions or notify.
@@ -84,6 +104,9 @@ export function ChatApp() {
   const [visibleTick, setVisibleTick] = useState(0);
   const [mentionToast, setMentionToast] = useState<MentionToast | null>(null);
   const [forwarding, setForwarding] = useState<ChatMessage | null>(null);
+  const [editRequest, setEditRequest] = useState<EditRequest | null>(null);
+  // My reminders that are not done: gone off (firedAt set) or waiting, soonest first.
+  const [reminders, setReminders] = useState<ChatReminder[]>([]);
 
   const socketRef = useRef<Socket | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -99,7 +122,14 @@ export function ChatApp() {
   // for those conversations are ignored meanwhile, since they may describe an older save.
   const draftSavesRef = useRef(new Map<string, { count: number; queue: Promise<void> }>());
   const jumpToRef = useRef<(conversationId: string, messageId: string, parentId: string | null) => void>(() => {});
+  // Conversation ids in sidebar order, for Alt+↑/↓.
+  const sidebarOrderRef = useRef<string[]>([]);
+  // A dialog or menu is open: it handles Esc and arrow keys itself.
+  const overlayOpenRef = useRef(false);
+  const remindersRef = useRef(reminders);
   bootstrapRef.current = bootstrap;
+  remindersRef.current = reminders;
+  overlayOpenRef.current = dialog !== null || menu !== null || forwarding !== null;
   prefsRef.current = prefs;
   idleRef.current = idle;
   threadIdRef.current = thread?.parentId ?? null;
@@ -146,6 +176,7 @@ export function ChatApp() {
       setBootstrap(data);
       setPinnedIds(data.pinnedConversationIds);
       setDrafts(data.drafts);
+      setReminders(data.reminders);
       setPrefs(readPrefs(data.me.id));
       let last: string | null = null;
       try { last = localStorage.getItem(`orbit-chat-last:${data.me.id}`); } catch { /* storage unavailable */ }
@@ -374,6 +405,20 @@ export function ChatApp() {
     };
   }, []);
 
+  // A reminder going off sounds like a mention and shows a desktop notification when enabled, unless notifications are paused.
+  const alertReminder = useCallback((reminder: ChatReminder) => {
+    const state = bootstrapRef.current;
+    const current = prefsRef.current;
+    if (!state || isDnd(state.statuses[state.me.id])) return;
+    if (current.sound) playSound("mention");
+    if (!current.desktop || typeof Notification === "undefined" || Notification.permission !== "granted" || document.visibilityState === "visible") return;
+    const notification = new Notification("Reminder", { body: reminder.text, tag: `reminder-${reminder.id}` });
+    notification.onclick = () => {
+      window.focus();
+      notification.close();
+    };
+  }, []);
+
   const handleNew = useCallback((message: ChatMessage) => {
     const state = bootstrapRef.current;
     setTyping(current => {
@@ -434,6 +479,7 @@ export function ChatApp() {
       if (hasConnected) {
         // Events sent while we were offline are not replayed, so catch up from durable state.
         void refreshConversations();
+        api<{ reminders: ChatReminder[] }>("/api/reminders").then(data => setReminders(data.reminders)).catch(() => undefined);
         const conversationId = activeIdRef.current;
         if (conversationId) void loadMessages(conversationId, { catchUp: true });
         const parentId = threadIdRef.current;
@@ -483,6 +529,12 @@ export function ChatApp() {
     socket.on("draft:update", ({ conversationId, draft }: { conversationId: string; draft: Draft | null }) => {
       if (!draftSavesRef.current.has(conversationId)) setDraft(conversationId, draft);
     });
+    // A reminder was set, went off (firedAt set), was snoozed (firedAt null) or was marked done (null), here or in another tab.
+    socket.on("reminder:update", ({ reminderId, reminder }: { reminderId: string; reminder: ChatReminder | null }) => {
+      const justFired = Boolean(reminder?.firedAt) && !remindersRef.current.find(item => item.id === reminderId)?.firedAt;
+      setReminders(current => upsertReminder(current, reminderId, reminder));
+      if (justFired && reminder) alertReminder(reminder);
+    });
     socket.on("typing", (event: { conversationId: string; parentId: string | null; userId: string; displayName: string; typing: boolean }) => {
       if (event.userId === meId) return;
       const key = typingKey(event.conversationId, event.parentId);
@@ -498,7 +550,7 @@ export function ChatApp() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, applyDetails, removeConversation, updateConversation, setStatus, setDraft]);
+  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, applyDetails, removeConversation, updateConversation, setStatus, setDraft, alertReminder]);
 
   // Idle detection: no input in this tab for IDLE_AFTER_MS makes it idle. The server combines all of a
   // person's tabs, so they show as away only when every tab is idle.
@@ -830,16 +882,92 @@ export function ChatApp() {
     try { if (me) localStorage.setItem(`orbit-chat-notify:${me.id}`, JSON.stringify(next)); } catch { /* storage unavailable */ }
   }
 
-  // Global shortcuts: ⌘K / Ctrl+K opens the palette, ⌘/ / Ctrl+/ opens help.
+  // /remind and /status from a composer in `conversationId`. Resolves true when done, which clears the composer.
+  async function runCommand(conversationId: string, name: "remind" | "status", args: string) {
+    if (name === "status") {
+      const parsed = parseStatus(args);
+      if (parsed.kind === "open") {
+        // The status menu lives in the sidebar, which is a drawer on small screens.
+        if (window.matchMedia("(max-width: 767px)").matches) setShowSidebar(true);
+        setMenu("status");
+        return true;
+      }
+      if (parsed.kind === "error") { setNotice(parsed.error); return false; }
+      const custom = parsed.kind === "clear" ? null : { emoji: parsed.emoji, text: parsed.text, expiresAt: null };
+      const ok = await saveStatus({ custom });
+      if (ok) setNotice(custom ? `Status set to ${[custom.emoji, custom.text].filter(Boolean).join(" ")}.` : "Status cleared.");
+      return ok;
+    }
+    if (/^list$/i.test(args.trim())) { setRightPanel("reminders"); return true; }
+    const parsed = parseReminder(args);
+    if ("error" in parsed) { setNotice(parsed.error); return false; }
+    try {
+      const { reminder } = await api<{ reminder: ChatReminder }>("/api/reminders", { method: "POST", json: { text: parsed.text, remindAt: parsed.at.toISOString(), conversationId } });
+      setReminders(current => upsertReminder(current, reminder.id, reminder));
+      setNotice(`Reminder set ${reminderTimeLabel(parsed.at)}: “${parsed.text}”`);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not set the reminder.");
+      return false;
+    }
+  }
+
+  // Done (or deleting one that has not gone off) removes the reminder; snoozing makes it wait again. Both show
+  // at once and are put back on failure.
+  async function settleReminder(reminder: ChatReminder, snooze: boolean) {
+    const remindAt = new Date(Date.now() + SNOOZE_MS).toISOString();
+    setReminders(current => upsertReminder(current, reminder.id, snooze ? { ...reminder, remindAt, firedAt: null } : null));
+    try {
+      await api(`/api/reminders/${reminder.id}`, snooze ? { method: "PATCH", json: { remindAt } } : { method: "DELETE" });
+    } catch (error) {
+      setReminders(current => upsertReminder(current, reminder.id, reminder));
+      setNotice(error instanceof Error ? error.message : "Could not update the reminder.");
+    }
+  }
+
+  const clearEditRequest = useCallback(() => setEditRequest(null), []);
+
+  // Global shortcuts: ⌘K / Ctrl+K opens the palette, ⌘/ / Ctrl+/ opens help, Alt+↑/↓ move through the sidebar
+  // and Esc marks the open conversation read.
   useEffect(() => {
+    // Whether a dialog or menu was open when the key was pressed: its own Esc handler may close it first.
+    let overlayWasOpen = false;
+    const onKeyCapture = () => { overlayWasOpen = overlayOpenRef.current; };
     const onKey = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey)) return;
-      if (event.key.toLowerCase() === "k") { event.preventDefault(); setDialog(current => current === "palette" ? null : "palette"); }
-      if (event.key === "/") { event.preventDefault(); setDialog("help"); }
+      if (event.metaKey || event.ctrlKey) {
+        if (event.key.toLowerCase() === "k") { event.preventDefault(); setDialog(current => current === "palette" ? null : "palette"); }
+        if (event.key === "/") { event.preventDefault(); setDialog("help"); }
+        return;
+      }
+      // Keys that an edit box, suggestion list or dialog already handled are theirs.
+      if (event.defaultPrevented || overlayWasOpen) return;
+      if (event.altKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+        event.preventDefault();
+        const order = sidebarOrderRef.current;
+        const index = order.indexOf(activeIdRef.current ?? "");
+        const next = index === -1 ? (event.key === "ArrowDown" ? 0 : order.length - 1) : index + (event.key === "ArrowDown" ? 1 : -1);
+        if (next !== index && next >= 0 && next < order.length) openConversation(order[next]);
+        return;
+      }
+      if (event.key === "Escape" && !event.altKey && !event.shiftKey && activeIdRef.current) {
+        // Hides the "New messages" line and lets the read effect mark the conversation read again if needed.
+        setUnreadMarker(null);
+        lastMarkedRef.current = "";
+        setVisibleTick(tick => tick + 1);
+      }
     };
+    window.addEventListener("keydown", onKeyCapture, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    return () => {
+      window.removeEventListener("keydown", onKeyCapture, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [openConversation]);
+
+  // Keep the open conversation visible in the sidebar, e.g. after Alt+↓.
+  useEffect(() => {
+    if (activeId) document.querySelector(`[data-sidebar-id="${CSS.escape(activeId)}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [activeId]);
 
   useEffect(() => {
     if (!mentionToast) return;
@@ -848,6 +976,7 @@ export function ChatApp() {
   }, [mentionToast]);
 
   // Unread mentions show in the tab title so they are noticed from other tabs too.
+  const overdueReminders = reminders.filter(reminder => reminder.firedAt);
   const totalMentions = bootstrap?.conversations.reduce((sum, c) => sum + (inSidebar(c) ? c.mentionCount : 0), 0) ?? 0;
   useEffect(() => {
     document.title = totalMentions > 0 ? `(@${totalMentions}) Orbit Chat` : "Orbit Chat";
@@ -872,12 +1001,28 @@ export function ChatApp() {
   const people = [...bootstrap.users]
     .filter(user => user.displayName.toLowerCase().includes(filter.toLowerCase()) && !pinnedSet.has(dmByPartner.get(user.id)?.id ?? ""))
     .sort((a, b) => Number(b.id === me.id) - Number(a.id === me.id) || a.displayName.localeCompare(b.displayName));
+  sidebarOrderRef.current = [...pinnedConversations, ...channels, ...people.flatMap(user => dmByPartner.get(user.id) ?? [])].map(c => c.id);
   const activePinned = activeConversation !== null && pinnedSet.has(activeConversation.id);
   const activeLabel = activeConversation ? label(activeConversation) : "Choose a conversation";
   const activePartner = activeConversation?.type === "DM" ? usersById.get(dmPartnerId(activeConversation, me.id)) : undefined;
   const activeChannel = activeConversation?.type === "CHANNEL" ? activeConversation : null;
   const activePermissions = activeChannel ? channelPermissions(activeChannel, me.id, canModerate) : null;
   const archivedNotice = activeChannel?.archivedAt ? `#${activeChannel.name} is archived, so it's read-only.` : null;
+  // ↑ in an empty composer edits my last message there. Returns false when there is nothing to edit.
+  const editLastMessage = () => {
+    const index = lastEditable(history.messages, me.id);
+    if (index === -1 || archivedNotice) return false;
+    virtualizer.scrollToIndex(index + 1, { align: "auto" });
+    setEditRequest({ id: history.messages[index].id, where: "main" });
+    return true;
+  };
+  const editLastReply = () => {
+    const messages = thread?.parent ? [thread.parent, ...thread.replies] : [];
+    const index = lastEditable(messages, me.id);
+    if (index === -1 || archivedNotice) return false;
+    setEditRequest({ id: messages[index].id, where: "thread" });
+    return true;
+  };
   // Public channels can mention anyone in the workspace; DMs and private channels only their members.
   const mentionable = bootstrap.users
     .filter(user => user.id !== me.id && (!activeConversation || (activeConversation.type === "CHANNEL" && !activeConversation.isPrivate) || activeConversation.memberIds.includes(user.id)))
@@ -959,7 +1104,8 @@ export function ChatApp() {
         {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
         <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
           highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
-          replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} openForwarded={openForwarded}/>
+          replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} openForwarded={openForwarded}
+          editRequested={editRequest?.where === "main" && editRequest.id === message.id} onEditRequestHandled={clearEditRequest}/>
         {seenId === message.id && (
           <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
         )}
@@ -1000,7 +1146,7 @@ export function ChatApp() {
     const muted = prefs.muted.includes(item.id);
     const Icon = item.isPrivate ? Lock : Hash;
     return (
-      <button key={item.id} onClick={() => openConversation(item.id)} className={cn(navItem(active, mentioned || (unread && !muted)), muted && !mentioned && !active && "opacity-60")}>
+      <button key={item.id} data-sidebar-id={item.id} aria-current={active ? "page" : undefined} onClick={() => openConversation(item.id)} className={cn(navItem(active, mentioned || (unread && !muted)), muted && !mentioned && !active && "opacity-60")}>
         <Icon size={item.isPrivate ? 13 : 15} className={active ? "text-brand-600" : "text-zinc-400"}/><span className="truncate">{item.name}</span>
         {!active && rowBadge(item, muted)}
       </button>
@@ -1011,7 +1157,7 @@ export function ChatApp() {
     const active = dm !== undefined && dm.id === activeId;
     const unread = dm !== undefined && (dm.unreadCount > 0 || dm.mentionCount > 0) && !active;
     return (
-      <button key={user.id} onClick={() => void openDm(user.id)} className={navItem(active, unread)}>
+      <button key={user.id} data-sidebar-id={dm?.id} aria-current={active ? "page" : undefined} onClick={() => void openDm(user.id)} className={navItem(active, unread)}>
         <Avatar name={user.displayName} color={user.avatarColor} size="sm" presence={presenceOf(user.id)} dnd={isDnd(statusOf(user.id), now)}/>
         <span className="truncate">{user.displayName}{user.id === me.id && <span className="font-normal text-zinc-400"> (you)</span>}</span>
         {statusEmoji(user.id)}
@@ -1041,6 +1187,10 @@ export function ChatApp() {
           <nav aria-label="Workspace" className="mt-3 space-y-0.5">
             <button onClick={() => setRightPanel(current => current === "activity" ? null : "activity")} aria-pressed={rightPanel === "activity"} className={navItem(rightPanel === "activity", totalMentions > 0)}><AtSign size={15} className={totalMentions > 0 ? "text-amber-500" : "text-zinc-400"}/>Activity{totalMentions > 0 && mentionBadge(totalMentions)}</button>
             <button onClick={() => setRightPanel(current => current === "people" ? null : "people")} aria-pressed={rightPanel === "people"} className={navItem(rightPanel === "people")}><Users size={15} className="text-zinc-400"/>People</button>
+            <button onClick={() => setRightPanel(current => current === "reminders" ? null : "reminders")} aria-pressed={rightPanel === "reminders"} className={navItem(rightPanel === "reminders", overdueReminders.length > 0)}>
+              <AlarmClock size={15} className={overdueReminders.length > 0 ? "text-brand-600" : "text-zinc-400"}/>Reminders
+              {overdueReminders.length > 0 && <span title={`${overdueReminders.length} overdue`} className="ml-auto min-w-[20px] rounded-md bg-brand-600 px-1.5 py-px text-center text-[11px] font-semibold tabular-nums text-white">{countLabel(overdueReminders.length)}</span>}
+            </button>
           </nav>
         </div>
 
@@ -1176,7 +1326,8 @@ export function ChatApp() {
               <Composer key={activeConversation.id} conversationId={activeConversation.id} placeholder={`Message ${activePartner ? activeLabel : `#${activeLabel}`}`}
                 typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={emitTyping} onNotice={setNotice}
                 savedDraft={drafts[activeConversation.id]?.body} onDraftChange={body => saveDraft(activeConversation.id, body)}
-                onSend={(body, attachments) => sendMessage(activeConversation.id, null, body, attachments)}/>
+                onSend={(body, attachments) => sendMessage(activeConversation.id, null, body, attachments)}
+                onEditLast={editLastMessage} onCommand={(name, args) => runCommand(activeConversation.id, name, args)}/>
             )}
           </div>
         </div>
@@ -1188,31 +1339,61 @@ export function ChatApp() {
           typingText={typingText(thread.parent?.conversationId ?? activeId ?? "", thread.parentId)} highlightId={highlightId} mentionable={mentionable}
           broadcastMentions={activeConversation?.type === "CHANNEL"} readOnlyNotice={archivedNotice ?? (activeChannel && !activeChannel.isMember ? `Join #${activeChannel.name} to reply.` : null)} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
           onSend={(body, attachments) => sendMessage(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, body, attachments)}
-          onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} openForwarded={openForwarded}/>
+          onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} openForwarded={openForwarded}
+          editRequestId={editRequest?.where === "thread" ? editRequest.id : null} onEditRequestHandled={clearEditRequest} onEditLast={editLastReply}
+          onCommand={(name, args) => runCommand(thread.parent?.conversationId ?? activeId ?? "", name, args)}/>
       )}
       {rightPanel === "activity" && (
         <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>
       )}
+      {rightPanel === "reminders" && (
+        <RemindersPanel reminders={reminders} now={now} onClose={() => setRightPanel(null)}
+          sourceLabel={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? c.type === "CHANNEL" ? `#${label(c)}` : label(c) : null; }}
+          onOpenSource={id => { setRightPanel(null); openConversation(id); }}
+          onDone={reminder => void settleReminder(reminder, false)} onSnooze={reminder => void settleReminder(reminder, true)}/>
+      )}
       {rightPanel === "people" && <PeoplePanel users={bootstrap.users} meId={me.id} presenceOf={presenceOf} statusOf={statusOf} now={now} onOpenDm={userId => { setRightPanel(null); void openDm(userId); }} onClose={() => setRightPanel(null)}/>}
 
-      {mentionToast && (
-        <div role="status" aria-live="polite" className="fixed right-4 top-16 z-40 w-[min(360px,calc(100vw-2rem))] animate-pop-in">
-          <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-card p-3 shadow-soft">
-            <button onClick={() => { const { message } = mentionToast; setMentionToast(null); jumpTo(message.conversationId, message.id, message.parentId); }} className="flex min-w-0 flex-1 items-start gap-3 text-left">
-              <Avatar name={mentionToast.message.author.displayName} color={mentionToast.message.author.avatarColor}/>
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-1.5 text-[13px] text-zinc-600">
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-amber-400 text-amber-950"><AtSign size={10} strokeWidth={3}/></span>
-                  <span className="truncate"><b className="font-semibold text-zinc-900">{mentionToast.message.author.displayName}</b> {mentionToast.kind === "direct" ? "mentioned you" : `notified @${mentionToast.kind}`} in {mentionToast.where}</span>
+      <div className="pointer-events-none fixed right-4 top-16 z-40 flex max-h-[calc(100dvh-5rem)] w-[min(360px,calc(100vw-2rem))] flex-col gap-2 overflow-y-auto">
+        {mentionToast && (
+          <div role="status" aria-live="polite" className="pointer-events-auto animate-pop-in">
+            <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-card p-3 shadow-soft">
+              <button onClick={() => { const { message } = mentionToast; setMentionToast(null); jumpTo(message.conversationId, message.id, message.parentId); }} className="flex min-w-0 flex-1 items-start gap-3 text-left">
+                <Avatar name={mentionToast.message.author.displayName} color={mentionToast.message.author.avatarColor}/>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5 text-[13px] text-zinc-600">
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-amber-400 text-amber-950"><AtSign size={10} strokeWidth={3}/></span>
+                    <span className="truncate"><b className="font-semibold text-zinc-900">{mentionToast.message.author.displayName}</b> {mentionToast.kind === "direct" ? "mentioned you" : `notified @${mentionToast.kind}`} in {mentionToast.where}</span>
+                  </span>
+                  <span className="mt-1 line-clamp-2 block text-[13px] leading-5 text-zinc-800">{mentionsToText(mentionToast.message.body, id => usersById.get(id)?.displayName)}</span>
+                  <span className="mt-1.5 block text-[11px] font-medium text-amber-700">View message</span>
                 </span>
-                <span className="mt-1 line-clamp-2 block text-[13px] leading-5 text-zinc-800">{mentionsToText(mentionToast.message.body, id => usersById.get(id)?.displayName)}</span>
-                <span className="mt-1.5 block text-[11px] font-medium text-amber-700">View message</span>
-              </span>
-            </button>
-            <button onClick={() => setMentionToast(null)} aria-label="Dismiss" className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"><X size={14}/></button>
+              </button>
+              <button onClick={() => setMentionToast(null)} aria-label="Dismiss" className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"><X size={14}/></button>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+        {/* Overdue reminders pop up here, unless the Reminders panel already shows them. */}
+        {rightPanel !== "reminders" && overdueReminders.map(reminder => {
+          const source = reminder.conversationId ? bootstrap.conversations.find(c => c.id === reminder.conversationId) : undefined;
+          return (
+            <div key={reminder.id} role="status" aria-live="polite" className="pointer-events-auto flex animate-pop-in items-start gap-3 rounded-xl border border-zinc-200 bg-card p-3 shadow-soft">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600"><AlarmClock size={16}/></span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-medium text-zinc-500">
+                  Reminder · {dayLabel(reminder.remindAt) === "Today" ? timeLabel(reminder.remindAt) : `${dayLabel(reminder.remindAt)} at ${timeLabel(reminder.remindAt)}`}
+                  {source && <> · <button onClick={() => openConversation(source.id)} className="font-medium text-brand-600 transition hover:underline">{source.type === "CHANNEL" ? `#${label(source)}` : label(source)}</button></>}
+                </p>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-5 text-zinc-900">{reminder.text}</p>
+                <div className="mt-2 flex items-center gap-1.5">
+                  <Button size="sm" onClick={() => void settleReminder(reminder, false)} className="h-7 px-2.5 text-xs">Mark as done</Button>
+                  <Button size="sm" variant="outline" onClick={() => void settleReminder(reminder, true)} className="h-7 px-2.5 text-xs">Snooze 20 min</Button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
       {dialog === "palette" && (
         <CommandPalette conversations={bootstrap.conversations} users={bootstrap.users} me={me} label={label} onOpenConversation={openConversation}

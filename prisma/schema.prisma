@@ -59,6 +59,7 @@ model User {
   attachments         Attachment[]
   pinnedConversations PinnedConversation[]
   drafts              Draft[]
+  reminders           Reminder[]
 }
 
 // Better Auth tables.
@@ -150,6 +151,7 @@ model Conversation {
   attachments Attachment[]
   pinnedBy    PinnedConversation[]
   drafts      Draft[]
+  reminders   Reminder[]
 
   @@unique([workspaceId, type, name])
 }
@@ -270,6 +272,25 @@ model Draft {
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([userId, conversationId])
+  @@index([conversationId])
+}
+
+// A reminder someone set for themselves with /remind. The reminder clock (src/lib/reminders.ts) sets firedAt
+// when remindAt passes; it stays until marked done (deleted) or snoozed (new remindAt, firedAt cleared).
+model Reminder {
+  id             String        @id @default(cuid())
+  userId         String
+  // Where it was set, so the reminder can link back. Cleared if the conversation is deleted.
+  conversationId String?
+  text           String
+  remindAt       DateTime
+  firedAt        DateTime?
+  createdAt      DateTime      @default(now())
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([firedAt, remindAt])
+  @@index([userId, firedAt])
   @@index([conversationId])
 }
 

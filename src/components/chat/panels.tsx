@@ -1,15 +1,17 @@
 "use client";
 
 import { ReactNode, useEffect, useState } from "react";
-import { AtSign, Hash, Loader2, MessageSquareText, SmilePlus, X } from "lucide-react";
+import { AlarmClock, AtSign, Hash, Loader2, MessageSquareText, SmilePlus, Trash2, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
-import { Composer } from "@/components/chat/composer";
+import { Button } from "@/components/ui/button";
+import { Composer, type ComposerProps } from "@/components/chat/composer";
 import { MessageItem, type MessageActions } from "@/components/chat/message-item";
 import { dayLabel, isGrouped, timeLabel } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { mentionsToText } from "@/lib/mentions";
 import { customStatus, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
-import type { ActivityItem, ChatAttachment, ChatMessage, ChatUser } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import type { ActivityItem, ChatAttachment, ChatMessage, ChatReminder, ChatUser } from "@/lib/types";
 
 function PanelShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode }) {
   return (
@@ -42,9 +44,13 @@ type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
   onTyping: (conversationId: string, parentId: string | null, typing: boolean) => void;
   onNotice: (message: string) => void;
+  // The message ↑ asked to edit in this thread, if any.
+  editRequestId: string | null;
+  onEditLast: () => boolean;
+  onCommand: ComposerProps["onCommand"];
 };
 
-export function ThreadPanel({ thread, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, broadcastMentions, readOnlyNotice, onClose, onLoadMore, onSend, onTyping, onNotice, ...actions }: ThreadPanelProps) {
+export function ThreadPanel({ thread, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, broadcastMentions, readOnlyNotice, onClose, onLoadMore, onSend, onTyping, onNotice, editRequestId, onEditLast, onCommand, ...actions }: ThreadPanelProps) {
   const { parent, replies } = thread;
   return (
     <PanelShell title="Thread" subtitle={conversationName} onClose={onClose}>
@@ -53,12 +59,12 @@ export function ThreadPanel({ thread, conversationName, me, canModerate, usersBy
           <div className="flex justify-center py-10 text-zinc-400"><Loader2 className="animate-spin" size={20}/></div>
         ) : parent && (
           <>
-            <MessageItem message={parent} grouped={false} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === parent.id} readOnly={Boolean(readOnlyNotice)} {...actions}/>
+            <MessageItem message={parent} grouped={false} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === parent.id} readOnly={Boolean(readOnlyNotice)} editRequested={editRequestId === parent.id} {...actions}/>
             <div className="my-3 flex items-center gap-3 px-2 text-[11px] font-medium text-zinc-400">
               {parent.replyCount} {parent.replyCount === 1 ? "reply" : "replies"}<div className="h-px flex-1 bg-zinc-200"/>
             </div>
             {replies.map((reply, index) => (
-              <MessageItem key={reply.id} message={reply} grouped={isGrouped(reply, replies[index - 1])} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === reply.id} readOnly={Boolean(readOnlyNotice)} {...actions}/>
+              <MessageItem key={reply.id} message={reply} grouped={isGrouped(reply, replies[index - 1])} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === reply.id} readOnly={Boolean(readOnlyNotice)} editRequested={editRequestId === reply.id} {...actions}/>
             ))}
             {thread.nextCursor && (
               <button onClick={onLoadMore} disabled={thread.loading} className="mx-auto mt-3 block rounded-md border border-zinc-200 bg-card px-3 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 disabled:text-zinc-400">
@@ -71,7 +77,7 @@ export function ThreadPanel({ thread, conversationName, me, canModerate, usersBy
       {parent && !parent.deletedAt && readOnlyNotice && <p className="mx-4 mb-4 rounded-lg bg-zinc-50 px-3 py-2.5 text-center text-xs text-zinc-500">{readOnlyNotice}</p>}
       {parent && !parent.deletedAt && !readOnlyNotice && (
         <div className="px-4 pb-4">
-          <Composer key={thread.parentId} conversationId={parent.conversationId} parentId={parent.id} placeholder="Reply…" typingText={typingText} compact autoFocus mentionable={mentionable} broadcastMentions={broadcastMentions} onSend={onSend} onTyping={onTyping} onNotice={onNotice}/>
+          <Composer key={thread.parentId} conversationId={parent.conversationId} parentId={parent.id} placeholder="Reply…" typingText={typingText} compact autoFocus mentionable={mentionable} broadcastMentions={broadcastMentions} onSend={onSend} onEditLast={onEditLast} onCommand={onCommand} onTyping={onTyping} onNotice={onNotice}/>
         </div>
       )}
     </PanelShell>
@@ -156,3 +162,70 @@ export function PeoplePanel({ users, meId, presenceOf, statusOf, now, onOpenDm, 
     </PanelShell>
   );
 }
+
+// "Today at 3:20 PM", "Tomorrow at 9:00 AM", "Friday, Oct 24 at 9:00 AM".
+function reminderWhen(value: string, now: number) {
+  const days = Math.round((new Date(value).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 86_400_000);
+  return `${days === 1 ? "Tomorrow" : dayLabel(value)} at ${timeLabel(value)}`;
+}
+
+export function RemindersPanel({ reminders, now, sourceLabel, onOpenSource, onDone, onSnooze, onClose }: {
+  // Soonest first.
+  reminders: ChatReminder[];
+  now: number;
+  // Where a reminder was set ("#general", "Aisha Khan"), or null if the user can no longer see it.
+  sourceLabel: (conversationId: string) => string | null;
+  onOpenSource: (conversationId: string) => void;
+  // Marks an overdue reminder done, or deletes an upcoming one.
+  onDone: (reminder: ChatReminder) => void;
+  onSnooze: (reminder: ChatReminder) => void;
+  onClose: () => void;
+}) {
+  const overdue = reminders.filter(reminder => reminder.firedAt);
+  const upcoming = reminders.filter(reminder => !reminder.firedAt);
+  const row = (reminder: ChatReminder) => {
+    const source = reminder.conversationId ? sourceLabel(reminder.conversationId) : null;
+    return (
+      <li key={reminder.id} className="group flex gap-3 rounded-lg p-3 transition hover:bg-zinc-50">
+        <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-lg", reminder.firedAt ? "bg-brand-50 text-brand-600" : "bg-zinc-100 text-zinc-500")}><AlarmClock size={14}/></span>
+        <div className="min-w-0 flex-1">
+          <p className="whitespace-pre-wrap break-words text-[13px] leading-5 text-zinc-900">{reminder.text}</p>
+          <p className="mt-0.5 flex flex-wrap items-center gap-x-1 text-[11px] text-zinc-400">
+            <time dateTime={reminder.remindAt} className={cn(reminder.firedAt && "font-medium text-brand-600")}>{reminderWhen(reminder.remindAt, now)}</time>
+            {source && <>·<button onClick={() => onOpenSource(reminder.conversationId!)} className="font-medium text-zinc-500 transition hover:text-zinc-800 hover:underline">{source}</button></>}
+          </p>
+          {reminder.firedAt && (
+            <div className="mt-2 flex items-center gap-1.5">
+              <Button size="sm" onClick={() => onDone(reminder)} className="h-7 px-2.5 text-xs">Mark as done</Button>
+              <Button size="sm" variant="outline" onClick={() => onSnooze(reminder)} className="h-7 px-2.5 text-xs">Snooze 20 min</Button>
+            </div>
+          )}
+        </div>
+        {!reminder.firedAt && (
+          <button title="Delete reminder" aria-label={`Delete reminder: ${reminder.text}`} onClick={() => onDone(reminder)}
+            className="h-7 shrink-0 rounded-md p-1.5 text-zinc-400 opacity-0 transition hover:bg-rose-50 hover:text-rose-600 focus:opacity-100 group-hover:opacity-100"><Trash2 size={14}/></button>
+        )}
+      </li>
+    );
+  };
+  const section = (title: string, items: ChatReminder[]) => items.length > 0 && (
+    <section className="mb-3">
+      <h3 className="px-3 pb-1 pt-2 text-[11px] font-medium text-zinc-400">{title} · {items.length}</h3>
+      <ul>{items.map(row)}</ul>
+    </section>
+  );
+  return (
+    <PanelShell title="Reminders" subtitle={reminders.length ? `${overdue.length} overdue · ${upcoming.length} upcoming` : undefined} onClose={onClose}>
+      <div className="flex-1 overflow-y-auto p-3">
+        {reminders.length === 0 && (
+          <p className="px-4 py-12 text-center text-xs leading-5 text-zinc-500">
+            No reminders. Type <code className="rounded border border-zinc-200 bg-zinc-50 px-1 py-0.5 font-mono text-[11px] text-zinc-700">/remind me to stretch in 20 minutes</code> in any message box to set one.
+          </p>
+        )}
+        {section("Overdue", overdue)}
+        {section("Upcoming", upcoming)}
+      </div>
+    </PanelShell>
+  );
+}
+

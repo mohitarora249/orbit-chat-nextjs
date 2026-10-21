@@ -1,14 +1,15 @@
 "use client";
 
 import { ClipboardEvent, DragEvent, Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, AtSign, Loader2, Megaphone, Paperclip, Smile, X } from "lucide-react";
+import { AlarmClock, ArrowUp, AtSign, ImagePlay, Loader2, Megaphone, Paperclip, Shuffle, Smile, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { api } from "@/lib/api";
+import { parseCommand, SLASH_COMMANDS, type SlashCommandName } from "@/lib/commands";
 import { encodeMentions, mentionsToText, mentionTargets, parseMentions, type BroadcastMention } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
-import type { ChatAttachment, ChatUser } from "@/lib/types";
+import type { ChatAttachment, ChatUser, Gif } from "@/lib/types";
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_FILES = 10;
@@ -38,11 +39,22 @@ const BROADCASTS: { kind: BroadcastMention; hint: string }[] = [
   { kind: "here", hint: "Notify everyone online right now" }
 ];
 
-type Suggestion = { kind: "user"; user: ChatUser } | { kind: BroadcastMention; hint: string };
+type CommandSuggestion = { kind: "command"; name: SlashCommandName; usage: string; hint: string };
+type Suggestion = { kind: "user"; user: ChatUser } | { kind: BroadcastMention; hint: string } | CommandSuggestion;
+
+const COMMAND_ICONS: Record<SlashCommandName, React.ReactNode> = { giphy: <ImagePlay size={13}/>, remind: <AlarmClock size={13}/>, status: <Smile size={13}/> };
+
+const suggestionGroup = (suggestion: Suggestion) => suggestion.kind === "user" ? "People" : suggestion.kind === "command" ? "Commands" : "Notify";
+
+// The command being typed: "/" and letters, nothing after them yet.
+const COMMAND_QUERY = /^\/([a-z]*)$/i;
+
+// A /giphy search waiting to be sent, shuffled or cancelled. Only this person sees it.
+type GifPreview = { query: string; gifs: Gif[]; index: number };
 
 type Upload = { localId: string; fileName: string; size: number; state: "uploading" | "ready" | "error"; attachment?: ChatAttachment; error?: string };
 
-type Props = {
+export type ComposerProps = {
   conversationId: string;
   parentId?: string;
   placeholder: string;
@@ -58,6 +70,11 @@ type Props = {
   savedDraft?: string;
   onDraftChange?: (body: string) => void;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
+  // ↑ in an empty composer: start editing the user's last message here. Returns false if there is none.
+  onEditLast?: () => boolean;
+  // Runs /remind and /status; /giphy is handled here. Resolves true once done, which clears the text.
+  // Without it, text starting with "/" is sent as a message.
+  onCommand?: (name: Exclude<SlashCommandName, "giphy">, args: string) => Promise<boolean>;
   // Called with this composer's own conversation and thread, so a "stopped" sent on unmount reaches the
   // place the user was typing in, not wherever the app has moved on to.
   onTyping: (conversationId: string, parentId: string | null, typing: boolean) => void;
@@ -85,7 +102,7 @@ function decodeDraft(body: string, mentionable: ChatUser[]) {
   return { text: mentionsToText(body, id => byId.get(id)?.displayName, null), picked: [...new Set(picked)] };
 }
 
-export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, broadcastMentions, savedDraft = "", onDraftChange, onSend, onTyping, onNotice }: Props) {
+export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, broadcastMentions, savedDraft = "", onDraftChange, onSend, onEditLast, onCommand, onTyping, onNotice }: ComposerProps) {
   const [initial] = useState(() => decodeDraft(savedDraft, mentionable));
   const [draft, setDraft] = useState(initial.text);
   const [uploads, setUploads] = useState<Upload[]>([]);
@@ -97,6 +114,9 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
   // tokens, and a chosen person wins over someone else with the same name.
   const [picked, setPicked] = useState<ChatUser[]>(initial.picked);
   const [dragging, setDragging] = useState(false);
+  // The text when Esc closed the command list, so it stays closed until the text changes.
+  const [dismissedCommand, setDismissedCommand] = useState<string | null>(null);
+  const [gif, setGif] = useState<GifPreview | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const listId = useId();
@@ -199,12 +219,22 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
   const ready = uploads.filter(item => item.state === "ready" && item.attachment).map(item => item.attachment!);
   const canSend = !sending && !uploading && (draft.trim().length > 0 || ready.length > 0);
 
+  function clearDraft() {
+    setDraft("");
+    setPicked([]);
+    setTyping(false);
+    saveDraft("");
+  }
+
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     // While suggestions are open, Enter picks a person; it must never send.
     if (!canSend || suggesting) return;
     const text = draft.trim();
-    const body = encode(text, picked);
+    // "/remind ..." runs a command; "//text" sends "/text".
+    const command = onCommand && !text.startsWith("//") ? parseCommand(text) : null;
+    if (command) { void runCommand(command.name, command.args); return; }
+    const body = encode(onCommand && text.startsWith("//") ? text.slice(1) : text, picked);
     const sentUploads = uploads;
     const sentPicked = picked;
     setSending(true);
@@ -225,10 +255,66 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     textareaRef.current?.focus();
   }
 
-  const suggestions: Suggestion[] = mention ? [
-    ...mentionable.filter(user => matchesMention(user.displayName, mention.query)).slice(0, MAX_MENTION_SUGGESTIONS).map(user => ({ kind: "user" as const, user })),
-    ...(broadcastMentions ? BROADCASTS.filter(item => matchesMention(item.kind, mention.query)) : [])
-  ] : [];
+  async function runCommand(name: string, args: string) {
+    const known = SLASH_COMMANDS.find(command => command.name === name);
+    if (!known || !onCommand) { onNotice(`/${name} isn't a command. To send it as a message, start it with "//".`); return; }
+    setSending(true);
+    let done = false;
+    try {
+      done = known.name === "giphy" ? await searchGifs(args) : await onCommand(known.name, args);
+      if (done) clearDraft();
+    } finally {
+      setSending(false);
+      // A GIF preview takes focus (its Send button), so Enter sends it and Esc cancels.
+      if (!(done && known.name === "giphy")) textareaRef.current?.focus();
+    }
+  }
+
+  async function searchGifs(query: string) {
+    if (!query) { onNotice("Add what to search for, like /giphy high five."); return false; }
+    try {
+      const { gifs } = await api<{ gifs: Gif[] }>(`/api/giphy?q=${encodeURIComponent(query)}`);
+      if (!gifs.length) { onNotice(`No GIFs found for "${query}".`); return false; }
+      setGif({ query, gifs, index: 0 });
+      return true;
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Could not search GIFs.");
+      return false;
+    }
+  }
+
+  function shuffleGif() {
+    setGif(current => {
+      if (!current || current.gifs.length < 2) return current;
+      // Any other result, never the same one twice in a row.
+      const pick = Math.floor(Math.random() * (current.gifs.length - 1));
+      return { ...current, index: pick >= current.index ? pick + 1 : pick };
+    });
+  }
+
+  function closeGif() {
+    setGif(null);
+    textareaRef.current?.focus();
+  }
+
+  async function sendGif() {
+    if (!gif || sending) return;
+    const preview = gif;
+    setGif(null);
+    setSending(true);
+    const ok = await onSend(preview.gifs[preview.index].url, []);
+    if (!ok) setGif(preview);
+    setSending(false);
+    textareaRef.current?.focus();
+  }
+
+  const commandQuery = onCommand && draft !== dismissedCommand ? COMMAND_QUERY.exec(draft)?.[1].toLowerCase() : undefined;
+  const suggestions: Suggestion[] = commandQuery !== undefined
+    ? SLASH_COMMANDS.filter(command => command.name.startsWith(commandQuery)).map(command => ({ kind: "command" as const, ...command }))
+    : mention ? [
+      ...mentionable.filter(user => matchesMention(user.displayName, mention.query)).slice(0, MAX_MENTION_SUGGESTIONS).map(user => ({ kind: "user" as const, user })),
+      ...(broadcastMentions ? BROADCASTS.filter(item => matchesMention(item.kind, mention.query)) : [])
+    ] : [];
   const suggesting = suggestions.length > 0;
   const activeMention = Math.min(mentionIndex, suggestions.length - 1);
 
@@ -238,7 +324,14 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     if (next?.start !== mention?.start || next?.query !== mention?.query) setMentionIndex(0);
   }
 
-  function pickMention(suggestion: Suggestion) {
+  function pickSuggestion(suggestion: Suggestion) {
+    if (suggestion.kind !== "command") { pickMention(suggestion); return; }
+    const next = `/${suggestion.name} `;
+    setDraft(next);
+    pendingCaretRef.current = next.length;
+  }
+
+  function pickMention(suggestion: Exclude<Suggestion, CommandSuggestion>) {
     if (!mention) return;
     const end = mention.start + 1 + mention.query.length;
     const label = suggestion.kind === "user" ? suggestion.user.displayName : suggestion.kind;
@@ -264,15 +357,25 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    // Alt+↑/↓ switch conversations (handled by the app).
+    if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) return;
     if (suggesting) {
       if (event.key === "ArrowDown") { event.preventDefault(); setMentionIndex(index => (index + 1) % suggestions.length); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); setMentionIndex(index => (index - 1 + suggestions.length) % suggestions.length); return; }
       if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.nativeEvent.isComposing) {
         event.preventDefault();
-        pickMention(suggestions[activeMention]);
+        pickSuggestion(suggestions[activeMention]);
         return;
       }
-      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMention(null); return; }
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMention(null); setDismissedCommand(draft); return; }
+    }
+    if (gif && !draft) {
+      if (event.key === "Escape") { event.preventDefault(); setGif(null); return; }
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendGif(); return; }
+    }
+    if (event.key === "ArrowUp" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !draft && !uploads.length && onEditLast?.()) {
+      event.preventDefault();
+      return;
     }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       event.preventDefault();
@@ -307,20 +410,28 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
       <form onSubmit={submit} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}
         className={cn("relative rounded-xl border bg-card shadow-float transition duration-150 focus-within:border-zinc-300 focus-within:shadow-soft", dragging ? "border-brand-400 ring-4 ring-brand-100" : "border-zinc-200")}>
         {suggesting && (
-          <ul id={`${listId}-mentions`} role="listbox" aria-label="Mention suggestions" className="absolute bottom-full left-0 z-40 mb-2 w-72 max-w-full animate-pop-in overflow-hidden rounded-xl border border-zinc-200/80 bg-card p-1 shadow-soft">
+          <ul id={`${listId}-mentions`} role="listbox" aria-label={commandQuery !== undefined ? "Commands" : "Mention suggestions"} className="absolute bottom-full left-0 z-40 mb-2 w-72 max-w-full animate-pop-in overflow-hidden rounded-xl border border-zinc-200/80 bg-card p-1 shadow-soft">
             {suggestions.map((suggestion, index) => (
-              <Fragment key={suggestion.kind === "user" ? suggestion.user.id : suggestion.kind}>
-                {(index === 0 || (suggestion.kind === "user") !== (suggestions[index - 1].kind === "user")) && (
-                  <li role="presentation" className={cn("px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-400", index > 0 && "mt-1 border-t border-zinc-100")}>{suggestion.kind === "user" ? "People" : "Notify"}</li>
+              <Fragment key={suggestion.kind === "user" ? suggestion.user.id : suggestion.kind === "command" ? suggestion.name : suggestion.kind}>
+                {(index === 0 || suggestionGroup(suggestion) !== suggestionGroup(suggestions[index - 1])) && (
+                  <li role="presentation" className={cn("px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-400", index > 0 && "mt-1 border-t border-zinc-100")}>{suggestionGroup(suggestion)}</li>
                 )}
                 <li id={`${listId}-mention-${index}`} role="option" aria-selected={index === activeMention}
                   // mousedown, not click: keep focus in the textarea so the caret position is not lost.
-                  onMouseDown={event => { event.preventDefault(); pickMention(suggestion); }} onMouseEnter={() => setMentionIndex(index)}
+                  onMouseDown={event => { event.preventDefault(); pickSuggestion(suggestion); }} onMouseEnter={() => setMentionIndex(index)}
                   className={cn("flex h-9 cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[13px]", index === activeMention ? "bg-zinc-100 text-zinc-900" : "text-zinc-700")}>
                   {suggestion.kind === "user" ? (
                     <>
                       <Avatar name={suggestion.user.displayName} color={suggestion.user.avatarColor} size="sm"/>
                       <span className="truncate font-medium">{suggestion.user.displayName}</span>
+                    </>
+                  ) : suggestion.kind === "command" ? (
+                    <>
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-zinc-600">{COMMAND_ICONS[suggestion.name]}</span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{suggestion.usage}</span>
+                        <span className="block truncate text-[11px] leading-4 text-zinc-400">{suggestion.hint}</span>
+                      </span>
                     </>
                   ) : (
                     <>
@@ -335,6 +446,24 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
             <li role="presentation" className="mt-1 border-t border-zinc-100 px-2.5 pb-1 pt-1.5 text-[11px] text-zinc-400">↑↓ choose · Enter insert · Esc dismiss</li>
           </ul>
         )}
+        {gif && (
+          <div aria-label={`GIF preview for ${gif.query}`} role="group" onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); closeGif(); } }}
+            className="mx-2 mt-2 animate-pop-in rounded-lg border border-zinc-200 bg-zinc-50 p-2">
+            <div className="flex items-center justify-between gap-2 px-0.5 text-[11px] text-zinc-500">
+              <span className="truncate">Only visible to you · <b className="font-medium text-zinc-700">/giphy {gif.query}</b></span>
+              <span className="shrink-0 tabular-nums text-zinc-400">{gif.index + 1} of {gif.gifs.length}</span>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element -- GIFs are served by GIPHY */}
+            <img src={gif.gifs[gif.index].url} alt={gif.gifs[gif.index].title} referrerPolicy="no-referrer" style={{ aspectRatio: `${gif.gifs[gif.index].width} / ${gif.gifs[gif.index].height}` }}
+              className="mt-2 h-36 w-auto max-w-full rounded-md bg-zinc-100 object-cover"/>
+            <div className="mt-2 flex items-center gap-1.5">
+              <Button type="button" size="sm" autoFocus onClick={() => void sendGif()} className="h-7 px-2.5 text-xs">Send</Button>
+              <Button type="button" size="sm" variant="outline" onClick={shuffleGif} disabled={gif.gifs.length < 2} className="h-7 gap-1 px-2.5 text-xs"><Shuffle size={12}/>Shuffle</Button>
+              <Button type="button" size="sm" variant="ghost" onClick={closeGif} className="h-7 px-2.5 text-xs">Cancel</Button>
+              <span className="ml-auto text-[10px] font-medium text-zinc-400">Powered by GIPHY</span>
+            </div>
+          </div>
+        )}
         {uploads.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {uploads.map(item => (
@@ -348,7 +477,8 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
           </div>
         )}
         <textarea ref={textareaRef} value={draft} maxLength={4000}
-          onChange={event => { setDraft(event.target.value); setTyping(event.target.value.trim().length > 0); updateMention(event.target.value, event.target.selectionStart); }}
+          // A command being typed is not a message, so it does not show as typing.
+          onChange={event => { setDraft(event.target.value); setTyping(event.target.value.trim().length > 0 && !(onCommand && event.target.value.startsWith("/"))); updateMention(event.target.value, event.target.selectionStart); }}
           onKeyUp={event => { if (!MENTION_KEYS.has(event.key)) updateMention(event.currentTarget.value, event.currentTarget.selectionStart); }}
           onClick={event => updateMention(event.currentTarget.value, event.currentTarget.selectionStart)}
           onBlur={() => { setTyping(false); setMention(null); }}
@@ -362,7 +492,7 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
             <button type="button" title="Mention someone" aria-label="Mention someone" onClick={startMention} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"><AtSign size={16}/></button>
             <button type="button" title="Emoji" aria-label="Insert emoji" onClick={() => setPicker(!picker)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700"><Smile size={16}/></button>
             {picker && <EmojiPicker className="bottom-11 left-0" onPick={insertEmoji} onClose={() => setPicker(false)}/>}
-            {!compact && <span className="ml-2 hidden text-[11px] text-zinc-400 sm:inline"><kbd className="font-sans font-medium text-zinc-500">Enter</kbd> to send · <kbd className="font-sans font-medium text-zinc-500">Shift + Enter</kbd> for a new line</span>}
+            {!compact && <span className="ml-2 hidden text-[11px] text-zinc-400 sm:inline"><kbd className="font-sans font-medium text-zinc-500">Enter</kbd> to send · <kbd className="font-sans font-medium text-zinc-500">Shift + Enter</kbd> for a new line{onCommand && <> · <kbd className="font-sans font-medium text-zinc-500">/</kbd> for commands</>}</span>}
           </div>
           <Button type="submit" size="icon" disabled={!canSend} title={uploading ? "Uploading…" : "Send"} aria-label={sending ? "Sending" : uploading ? "Uploading" : "Send"} className="h-8 w-8 rounded-lg">{sending || uploading ? <Loader2 size={14} className="animate-spin"/> : <ArrowUp size={16}/>}</Button>
         </div>

@@ -15,6 +15,8 @@ export type OutboxPayloads = {
   "user.status": { userId: string };
   "conversation.pins": { userId: string };
   "conversation.draft": { userId: string; conversationId: string };
+  // A reminder was set, went off, was snoozed or was marked done.
+  "reminder.updated": { userId: string; reminderId: string };
 };
 export type OutboxEventType = keyof OutboxPayloads;
 

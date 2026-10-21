@@ -65,3 +65,14 @@
 **Permissions:** members set the topic and description and add people; the channel's creator and workspace owners and admins also rename, archive and unarchive, and remove people. Anyone can leave, except the last member of a private channel, who should archive it instead. DMs cannot be managed.
 **Reason:** Leaving a channel only means something if membership decides what you see. Keeping public channels readable without joining keeps search, forwards and links working.
 **Note:** The migration made every workspace member a member of every existing public channel, so nobody's sidebar changed. New sign-ups join #general only. Unread mentions in channels the user has not joined are not counted or alerted.
+
+## ADR-014: Reminders are fired by a database clock and delivered through the outbox
+**Decision:** `/remind` is parsed in the browser (which knows the user's time zone) into text and an absolute time, and stored as a `Reminder`. Every server process runs a reminder clock that, every 5 seconds, sets `firedAt` on due reminders (`FOR UPDATE SKIP LOCKED`, so instances never double-fire) and queues a `reminder.updated` outbox event in the same transaction. The worker emits `reminder:update` to the user's own room. Fired reminders stay until marked done (deleted) or snoozed (new `remindAt`, `firedAt` cleared). Bootstrap and `GET /api/reminders` return all of the user's reminders, waiting or fired, for the Reminders panel, so a reminder that goes off while the user is offline is shown when they come back. Setting one also emits `reminder:update`, so every tab's list stays in sync.
+**Reason:** No in-memory timers to lose on restart or deploy, and delivery reuses the outbox's retries.
+**Note:** Reminders go off up to 5 seconds late. They are personal only (no reminding other people or channels, no repeats yet), limited to 100 waiting per user and a year ahead.
+
+## ADR-015: /giphy is proxied, and GIFs are stored as GIPHY media URLs
+**Decision:** `GET /api/giphy` searches GIPHY with the server's `GIPHY_API_KEY` (rating `GIPHY_RATING`, default `pg`) and returns up to 25 results as canonical `https://media.giphy.com/media/<id>/200.gif` URLs. The composer previews them privately (Send / Shuffle / Cancel), and sending posts a message whose body is just that URL. Renderers show a body that is exactly a GIPHY media URL as the image, and such URLs are not unfurled.
+**Reason:** The key never reaches browsers, and storing a URL needs no new message type or storage.
+**Note:** Like link-preview images, GIFs are loaded by viewers' browsers straight from GIPHY (`no-referrer`). Only GIPHY media URLs are shown inline, so the image cannot be pointed anywhere else.
+

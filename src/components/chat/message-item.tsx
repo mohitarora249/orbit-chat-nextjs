@@ -1,11 +1,11 @@
 "use client";
 
-import { Fragment, KeyboardEvent, memo, useState } from "react";
+import { Fragment, KeyboardEvent, memo, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
-import { parseLinks } from "@/lib/links";
+import { isGifUrl, parseLinks } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets, parseMentions } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ChatAttachment, ChatForward, ChatLinkPreview, ChatMessage, ChatUser } from "@/lib/types";
@@ -20,6 +20,8 @@ export type MessageActions = {
   onForward: (message: ChatMessage) => void;
   // Jumps to the original of a forwarded message; returns null if the viewer cannot see its conversation.
   openForwarded: (forward: ChatForward) => (() => void) | null;
+  // Called when a message starts editing because `editRequested` was set, so the request is not repeated.
+  onEditRequestHandled?: () => void;
 };
 
 type Props = MessageActions & {
@@ -33,6 +35,8 @@ type Props = MessageActions & {
   highlighted?: boolean;
   // In an archived channel: no reacting or editing (deleting is still allowed).
   readOnly?: boolean;
+  // ↑ in the composer asked to edit this message.
+  editRequested?: boolean;
 };
 
 // Links open in a new tab without telling the site where they came from. parseLinks only yields http(s) URLs.
@@ -45,6 +49,17 @@ function TextWithLinks({ text }: { text: string }) {
         ? <Fragment key={index}>{part}</Fragment>
         : <a key={index} href={part.url} target="_blank" rel={LINK_REL} className="text-brand-600 underline decoration-brand-200 underline-offset-2 transition hover:decoration-brand-500">{part.url}</a>)}
     </>
+  );
+}
+
+// A GIF posted with /giphy. The body is only its URL, so it is shown as the image.
+function GifView({ url }: { url: string }) {
+  return (
+    <span className="block w-fit">
+      {/* eslint-disable-next-line @next/next/no-img-element -- GIFs are served by GIPHY; no-referrer keeps the conversation URL private */}
+      <img src={url} alt="GIF" loading="lazy" referrerPolicy="no-referrer" className="h-40 w-auto max-w-full rounded-lg bg-zinc-100 object-cover"/>
+      <span className="mt-0.5 block text-[10px] font-medium text-zinc-400">via GIPHY</span>
+    </span>
   );
 }
 
@@ -132,7 +147,8 @@ export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: C
             <Avatar name={forward.author.displayName} color={forward.author.avatarColor} size="sm"/>
             <span className="truncate text-[13px] font-semibold text-zinc-900">{forward.author.displayName}</span>
           </div>
-          {forward.body && (
+          {forward.body && isGifUrl(forward.body) && <div className="mt-1"><GifView url={forward.body}/></div>}
+          {forward.body && !isGifUrl(forward.body) && (
             <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-800">
               <MessageBody body={forward.body} usersById={usersById} meId={meId}/>
               {forward.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(forward.editedAt)} at ${timeLabel(forward.editedAt)}`}>(edited)</span>}
@@ -154,7 +170,7 @@ export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: C
   );
 }
 
-function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded }: Props) {
+function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, editRequested, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded, onEditRequestHandled }: Props) {
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -164,34 +180,55 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
   const mine = message.authorId === me.id;
   const mentioned = !mine && !deleted && mentionsMe(message.body, me.id) !== null;
 
+  // Where focus goes back to when editing ends: the composer, when ↑ started the edit.
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
   // The edit box shows names; people already mentioned in the message win over others with the same name.
   function startEdit() {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setEditDraft(mentionsToText(message.body, id => usersById.get(id)?.displayName, null));
     setEditing(true);
   }
 
+  function stopEdit() {
+    setEditing(false);
+    const target = returnFocusRef.current;
+    returnFocusRef.current = null;
+    if (target?.isConnected) target.focus();
+  }
+
+  const canEdit = mine && !readOnly && !pending && !deleted && !isGifUrl(message.body);
+  useEffect(() => {
+    if (!editRequested) return;
+    onEditRequestHandled?.();
+    if (!canEdit || editing) return;
+    startEdit();
+    rootRef.current?.scrollIntoView({ block: "nearest" });
+  }, [editRequested]); // eslint-disable-line react-hooks/exhaustive-deps -- only a new request starts an edit
+
   async function saveEdit() {
     const alreadyMentioned = parseMentions(message.body).flatMap(part => typeof part !== "string" && part.kind === "user" && usersById.has(part.userId) ? [usersById.get(part.userId)!] : []);
     const body = encodeMentions(editDraft.trim(), mentionTargets([...alreadyMentioned, ...usersById.values()], true));
-    if (body === message.body) { setEditing(false); return; }
+    if (body === message.body) { stopEdit(); return; }
     setSaving(true);
     try {
       await onEdit(message, body);
-      setEditing(false);
+      stopEdit();
     } finally {
       setSaving(false);
     }
   }
 
   function onEditKey(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Escape") { event.preventDefault(); setEditing(false); }
+    if (event.key === "Escape") { event.preventDefault(); stopEdit(); }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void saveEdit(); }
   }
 
   const reactionNames = (userIds: string[]) => userIds.map(id => id === me.id ? "You" : usersById.get(id)?.displayName ?? "Someone").join(", ");
 
   return (
-    <div id={`message-${message.id}`} className={cn("group relative flex gap-3 rounded-lg px-2 py-1 transition-colors duration-150", grouped ? "" : "mt-4",
+    <div ref={rootRef} id={`message-${message.id}`} className={cn("group relative flex gap-3 rounded-lg px-2 py-1 transition-colors duration-150", grouped ? "" : "mt-4",
       highlighted ? "bg-brand-50 ring-1 ring-brand-200" : mentioned ? "rounded-l-none bg-amber-50/80 shadow-[inset_3px_0_0_theme(colors.amber.400)] hover:bg-amber-50" : "hover:bg-zinc-50/80")}>
       <div className="w-9 shrink-0">
         {grouped
@@ -209,13 +246,15 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
           <p className="text-sm italic leading-6 text-zinc-400">This message was deleted.</p>
         ) : editing ? (
           <div className="mt-1 rounded-lg border border-zinc-200 bg-card p-2 shadow-float ring-2 ring-brand-100">
-            <textarea autoFocus value={editDraft} onChange={event => setEditDraft(event.target.value)} onKeyDown={onEditKey} rows={2} maxLength={4000} aria-label="Edit message" className="w-full resize-y bg-transparent text-sm leading-6 outline-none"/>
+            <textarea autoFocus value={editDraft} onFocus={event => event.currentTarget.setSelectionRange(event.currentTarget.value.length, event.currentTarget.value.length)} onChange={event => setEditDraft(event.target.value)} onKeyDown={onEditKey} rows={2} maxLength={4000} aria-label="Edit message" className="w-full resize-y bg-transparent text-sm leading-6 outline-none"/>
             <div className="mt-1 flex items-center justify-end gap-2 text-[11px]">
               <span className="mr-auto text-zinc-400">Esc to cancel · Enter to save</span>
-              <button onClick={() => setEditing(false)} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition hover:bg-zinc-100">Cancel</button>
+              <button onClick={stopEdit} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition hover:bg-zinc-100">Cancel</button>
               <button onClick={() => void saveEdit()} disabled={saving} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-zinc-50 transition hover:bg-zinc-800 disabled:opacity-50">{saving ? "Saving…" : "Save"}</button>
             </div>
           </div>
+        ) : isGifUrl(message.body) ? (
+          <div className="mt-0.5"><GifView url={message.body}/></div>
         ) : (
           message.body && (
             <p className={cn("whitespace-pre-wrap break-words text-sm leading-6 transition-colors", pending ? "text-zinc-400" : "text-zinc-800")}>
@@ -263,7 +302,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
           {!readOnly && <button title="Add reaction" aria-label="Add reaction" onClick={() => setPicker(true)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><SmilePlus size={15}/></button>}
           {onOpenThread && <button title="Reply in thread" aria-label="Reply in thread" onClick={() => onOpenThread(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><MessageSquareText size={15}/></button>}
           <button title="Forward message" aria-label="Forward message" onClick={() => onForward(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Forward size={15}/></button>
-          {mine && !readOnly && <button title="Edit message" aria-label="Edit message" onClick={startEdit} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
+          {mine && !readOnly && !isGifUrl(message.body) && <button title="Edit message" aria-label="Edit message" onClick={startEdit} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
           {(mine || canModerate) && <button title="Delete message" aria-label="Delete message" onClick={() => onDelete(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14}/></button>}
           {picker && (
             <EmojiPicker className="right-0 top-8" onClose={() => setPicker(false)} onPick={emoji => {

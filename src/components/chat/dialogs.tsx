@@ -337,8 +337,18 @@ const SHORTCUTS: [string, string][] = [
   ["⌘ K / Ctrl K", "Jump to a conversation or search messages"],
   ["Enter", "Send message"],
   ["Shift + Enter", "New line"],
-  ["Esc", "Close a dialog, panel or edit"],
+  ["↑", "Edit your last message (in an empty message box)"],
+  ["⌥ ↑ / Alt ↑", "Previous conversation in the sidebar"],
+  ["⌥ ↓ / Alt ↓", "Next conversation in the sidebar"],
+  ["Esc", "Mark the conversation read, or close a dialog, menu or edit"],
   ["⌘ / / Ctrl /", "Show this help"]
+];
+
+const COMMANDS: [string, string][] = [
+  // ["/giphy cats", "Pick a GIF to post (Send, Shuffle or Cancel)"],
+  ["/remind me to stretch in 20 minutes", "Also \"at 3pm\", \"tomorrow at 9am\", \"on friday\""],
+  ["/remind list", "Open your reminders (also under Reminders in the sidebar)"],
+  ["/status 🌴 On vacation", "Set your status; /status clear removes it"]
 ];
 
 export function HelpDialog({ onClose }: { onClose: () => void }) {
@@ -350,10 +360,19 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
             <tr key={keys} className="border-b border-zinc-100 last:border-0"><td className="py-2 pr-4"><kbd className="whitespace-nowrap rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 font-mono text-[11px] text-zinc-700">{keys}</kbd></td><td className="py-2">{action}</td></tr>
           ))}
         </tbody></table>
+        <div>
+          <h3 className="mb-1 text-[11px] font-medium text-zinc-400">Slash commands</h3>
+          <table className="w-full"><tbody>
+            {COMMANDS.map(([example, action]) => (
+              <tr key={example} className="border-b border-zinc-100 last:border-0"><td className="py-2 pr-4"><code className="whitespace-nowrap rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 font-mono text-[11px] text-zinc-700">{example}</code></td><td className="py-2">{action}</td></tr>
+            ))}
+          </tbody></table>
+        </div>
         <ul className="list-disc space-y-1.5 pl-4 leading-5">
           <li>Hover a message to react, reply in a thread, forward, edit or delete it.</li>
           <li>Type <b>@</b> (or use the @ button) to mention someone; mentions appear in their Activity.</li>
           <li>Drop or paste files into the composer. Files are scanned for malware before anyone can download them.</li>
+          <li>To send a message that starts with <b>/</b>, start it with <b>//</b>.</li>
           <li>Search supports <b>"exact phrases"</b>, <b>OR</b> and <b>-excluded</b> words.</li>
         </ul>
       </div>

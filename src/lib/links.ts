@@ -45,11 +45,18 @@ export function normalizeUrl(raw: string): string | null {
   }
 }
 
-// The distinct links in a message, in order, to unfurl.
+// A GIF posted with /giphy: a GIPHY media URL, shown as the image itself instead of a link.
+const GIF_URL = /^https:\/\/media\d?\.giphy\.com\/media\/[A-Za-z0-9]+\/[\w-]+\.(?:gif|webp)$/;
+
+export function isGifUrl(url: string) {
+  return GIF_URL.test(url);
+}
+
+// The distinct links in a message, in order, to unfurl. GIFs are already shown inline, so they are skipped.
 export function extractLinks(body: string) {
   const urls = new Set<string>();
   for (const part of parseLinks(body)) {
-    if (typeof part === "string") continue;
+    if (typeof part === "string" || isGifUrl(part.url)) continue;
     const url = normalizeUrl(part.url);
     if (url) urls.add(url);
     if (urls.size === MAX_LINKS_PER_MESSAGE) break;

@@ -7,6 +7,7 @@ import { serializeStatus, statusSelect } from "./presence";
 import { deleteObject, openObject } from "./storage";
 import { scanFile } from "./scanner";
 import { refreshPreviews } from "./unfurl";
+import { reminderSelect, serializeReminder } from "./reminders";
 
 type Handlers = { [T in OutboxEventType]: (payload: OutboxPayloads[T]) => Promise<void> };
 type ClaimedEvent = { id: bigint; type: OutboxEventType; payload: unknown; attempts: number };
@@ -102,6 +103,11 @@ function createHandlers(io: Server): Handlers {
       const draft = await prisma.draft.findUnique({ where: { userId_conversationId: { userId, conversationId } }, select: { body: true, updatedAt: true } });
       io.to(`user:${userId}`).emit("draft:update", { conversationId, draft: draft && serializeDraft(draft) });
     },
+    // Like drafts: sends the reminder as it is now (null once it is done), to the user's own tabs only.
+    "reminder.updated": async ({ userId, reminderId }) => {
+      const reminder = await prisma.reminder.findUnique({ where: { id: reminderId }, select: reminderSelect });
+      io.to(`user:${userId}`).emit("reminder:update", { reminderId, reminder: reminder && serializeReminder(reminder) });
+    },
     "user.status": async ({ userId }) => {
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { ...statusSelect, workspaceLinks: { select: { workspaceId: true } } } });
       if (!user) return;
@@ -158,7 +164,7 @@ export function startOutboxWorker(io: Server) {
   const handlers = createHandlers(io);
   const lanes: Lane[] = [
     // Realtime fan-out is fast and ordering matters, so it runs one event at a time.
-    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.updated", "conversation.membership", "conversation.read", "user.status", "conversation.pins", "conversation.draft"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
+    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.updated", "conversation.membership", "conversation.read", "user.status", "conversation.pins", "conversation.draft", "reminder.updated"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
     // Scans are slow; keep them off the realtime lane so they never delay message delivery.
     { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 },
     // Link previews wait on other people's servers (up to 5 seconds per link), so they get their own lane too.
