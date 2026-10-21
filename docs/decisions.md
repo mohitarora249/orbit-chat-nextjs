@@ -54,3 +54,8 @@
 **Decision:** `Draft` holds one user's unsent text per conversation (mentions as `<@id>` tokens). The composer saves 800 ms after typing stops and immediately when it closes (switching conversation) or sends; `PUT /api/conversations/:id/draft` with blank text deletes it. Other tabs and devices get `draft:update` on the user's own room only. A tab ignores `draft:update` for a conversation while its own saves there are in flight, and an open composer with unsaved edits keeps them rather than taking a remote draft.  
 **Reason:** Saving on every keystroke would load the outbox for no benefit; saving on close is what makes switching channels safe. Ordering saves per conversation and letting unsaved local text win means a slow echo never overwrites what the user is typing.  
 **Note:** Attachments and thread-reply drafts are not kept. Drafts in conversations the user can no longer see are hidden, not deleted, like pins.
+
+## ADR-012: DM read receipts come from the existing read cursors
+**Decision:** In DMs only, `ConversationSummary.readCursors` carries each member's `ReadCursor.lastReadAt`, and moving a cursor also emits `conversation:seen` to the DM's room. The client shows "Seen" under the sender's newest message at or before the partner's cursor, as long as the partner has not written since.  
+**Reason:** The cursor already records exactly how far each person has read, so receipts need no new table or write path. The field is the same for both members, so it is safe on the broadcast `conversation:created` payload.  
+**Note:** Channels never expose other people's cursors. There is no opt-out yet, and "Seen" has no time: the cursor stores the read message's time, not when it was read.

@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import {
-  AtSign, Bell, ChevronDown, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
+  AtSign, Bell, CheckCheck, ChevronDown, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Logo } from "@/components/ui/logo";
@@ -436,6 +436,13 @@ export function ChatApp() {
     socket.on("conversation:read", ({ conversationId, lastReadAt }: { conversationId: string; lastReadAt: string }) => {
       updateConversation(conversationId, c => ({ ...c, unreadCount: 0, mentionCount: 0, lastReadAt: c.lastReadAt && c.lastReadAt > lastReadAt ? c.lastReadAt : lastReadAt }));
     });
+    // The other member of a DM read up to lastReadAt. Cursors only move forward, so keep the later one.
+    socket.on("conversation:seen", ({ conversationId, userId, lastReadAt }: { conversationId: string; userId: string; lastReadAt: string }) => {
+      updateConversation(conversationId, c => {
+        const current = c.readCursors[userId];
+        return current && current >= lastReadAt ? c : { ...c, readCursors: { ...c.readCursors, [userId]: lastReadAt } };
+      });
+    });
     socket.on("presence:update", ({ userId, presence: next }: { userId: string; presence: Presence }) => {
       setPresence(current => current[userId] === next ? current : { ...current, [userId]: next });
     });
@@ -825,6 +832,16 @@ export function ChatApp() {
     ].filter(Boolean).join(" · ");
   };
   const firstUnread = unreadMarker === null ? undefined : history.messages.find(m => m.createdAt > unreadMarker && m.authorId !== me.id && !isOptimistic(m));
+  // "Seen" goes under my newest message that the DM partner has read, unless they have written since.
+  const partnerReadAt = activePartner && activePartner.id !== me.id ? activeConversation?.readCursors[activePartner.id] : undefined;
+  let seenId: string | undefined;
+  if (partnerReadAt) {
+    for (let i = history.messages.length - 1; i >= 0; i--) {
+      const message = history.messages[i];
+      if (message.authorId !== me.id) break;
+      if (!isOptimistic(message) && message.createdAt <= partnerReadAt) { seenId = message.id; break; }
+    }
+  }
   const countLabel = (count: number) => count >= 100 ? "99+" : count;
   const mentionBadge = (count: number) => (
     <span title={`${count} unread ${count === 1 ? "mention" : "mentions"} of you`} className="ml-auto flex items-center gap-0.5 rounded-md bg-amber-400 px-1.5 py-px text-[11px] font-semibold tabular-nums text-amber-950">
@@ -1031,6 +1048,9 @@ export function ChatApp() {
                   <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
                     highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
                     onForward={onForward} openForwarded={openForwarded}/>
+                  {seenId === message.id && (
+                    <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
+                  )}
                 </Fragment>
               );
             })}

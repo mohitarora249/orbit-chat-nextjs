@@ -65,6 +65,9 @@ function createHandlers(io: Server): Handlers {
     "conversation.read": async ({ conversationId, userId, lastReadAt }) => {
       // Keeps the user's other tabs and devices in sync.
       io.to(`user:${userId}`).emit("conversation:read", { conversationId, lastReadAt });
+      // In a DM the other member sees it as a "Seen" receipt. Channels keep read state private.
+      const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { type: true } });
+      if (conversation?.type === "DM") io.to(`conversation:${conversationId}`).emit("conversation:seen", { conversationId, userId, lastReadAt });
     },
     // Sends the whole current list, so repeated or out-of-order events still leave tabs correct.
     "conversation.pins": async ({ userId }) => {

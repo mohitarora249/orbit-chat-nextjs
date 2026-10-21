@@ -77,6 +77,9 @@ export type ConversationSummary = {
   // thread-reply mentions are added on the client until the conversation is opened.
   mentionCount: number;
   lastReadAt: string | null;
+  // DMs only (empty for channels): each member's read cursor by user id, for "Seen" receipts. Not per-viewer,
+  // so it is safe on broadcast payloads; it only holds what both members can already see.
+  readCursors: Record<string, string>;
   lastMessage: { body: string; createdAt: string; author: { displayName: string } } | null;
 };
 
