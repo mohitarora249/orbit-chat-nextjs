@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { accessErrors, getConversationAccess } from "@/lib/access";
-import { cursorWhere, decodeCursor, encodeCursor, messageSelect, parseLimit, serializeMessage } from "@/lib/messages";
+import { cursorWhere, decodeCursor, encodeCursor, messageSelect, parseLimit, serializeMessage, syncMessageLinks } from "@/lib/messages";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
 import { HttpError, jsonError, parseJson, routeError } from "@/lib/http";
@@ -120,6 +120,7 @@ export async function POST(request: NextRequest, context: Context) {
           await tx.message.update({ where: { id: parentId }, data: { replyCount: { increment: 1 }, lastReplyAt: message.createdAt } });
         }
         await enqueue(tx, "message.created", { messageId: message.id });
+        await syncMessageLinks(tx, message.id, body);
         return message.id;
       });
       notifyOutbox();

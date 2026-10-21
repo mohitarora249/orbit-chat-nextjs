@@ -33,3 +33,9 @@
 **Decision:** Message bodies store `<@userId>`, `<!channel>` and `<!here>` tokens (Slack-style). The composer shows names and encodes them on send; every renderer resolves tokens to the current display name. A migration converted existing `@Display Name` text.  
 **Reason:** Name matching broke on renames and was ambiguous between similar names; id tokens make unread mention counts and Activity exact string matches.  
 **Note:** Whether someone was online for an `@here` is not stored, so it alerts live only.
+
+## ADR-008: Link previews are unfurled by the outbox worker, with an SSRF guard and a database cache
+**Decision:** Sending or editing a message records its links (`MessageLink`) and queues a `message.unfurl` outbox event in the same transaction. A separate worker lane fetches each page server-side, stores its Open Graph data in `LinkPreview` (keyed by URL, shared by every message that links it) and emits `message:updated`. Stored previews are reused for 24 hours, failures for 1 hour; a failed refresh keeps the last good preview.  
+**SSRF guard (src/lib/unfurl.ts):** http/https on default ports only, no credentials; every resolved address must be public (private, loopback, link-local/metadata, CGNAT, multicast, reserved, IPv6 non-global-unicast, 6to4/Teredo are refused), and the check runs as the socket's DNS lookup so the checked address is the one connected to (no DNS rebinding). Redirects are followed by hand (max 3) and re-checked; one 5-second deadline covers the whole fetch, and at most 1 MB of decompressed HTML is read.  
+**Reason:** Viewers' browsers never contact the linked site to build the card, slow sites never delay message delivery, and a URL is fetched once per day however many people post it.  
+**Note:** Preview images are loaded by viewers' browsers straight from the linked site (https only, `no-referrer`), which reveals their IP address to it. Proxying images through the server is the follow-up if that matters.

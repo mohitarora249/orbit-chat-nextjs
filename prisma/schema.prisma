@@ -26,6 +26,12 @@ enum AttachmentStatus {
   FAILED
 }
 
+enum LinkPreviewStatus {
+  PENDING
+  OK
+  FAILED
+}
+
 // `name` in Better Auth is mapped to `displayName` (see src/lib/auth.ts).
 model User {
   id              String               @id @default(cuid())
@@ -173,6 +179,7 @@ model Message {
   replies         Message[]                @relation("Thread")
   reactions       Reaction[]
   attachments     Attachment[]
+  links           MessageLink[]
 
   @@unique([authorId, clientMessageId])
   @@index([conversationId, createdAt, id])
@@ -224,6 +231,31 @@ model Attachment {
 
   @@index([messageId])
   @@index([uploaderId, status])
+}
+
+// Open Graph data for a URL, shared by every message that links to it. This table is the unfurl cache:
+// src/lib/unfurl.ts refetches a row once it is older than its TTL. Rows are created PENDING with the message.
+model LinkPreview {
+  url         String            @id
+  status      LinkPreviewStatus @default(PENDING)
+  title       String?
+  description String?
+  siteName    String?
+  imageUrl    String?
+  fetchedAt   DateTime?
+  messages    MessageLink[]
+}
+
+// The URLs found in a message body, in order (at most MAX_LINKS_PER_MESSAGE).
+model MessageLink {
+  messageId String
+  position  Int
+  url       String
+  message   Message     @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  preview   LinkPreview @relation(fields: [url], references: [url], onDelete: Cascade)
+
+  @@id([messageId, position])
+  @@index([url])
 }
 
 // Transactional outbox: written in the same transaction as the change it describes, then delivered by

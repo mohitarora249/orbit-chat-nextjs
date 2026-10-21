@@ -18,6 +18,15 @@ export type ChatAttachment = {
 
 export type ReactionSummary = { emoji: string; userIds: string[] };
 
+// Open Graph data for a link in the message. imageUrl is always https and points at the linked site.
+export type ChatLinkPreview = {
+  url: string;
+  title: string | null;
+  description: string | null;
+  siteName: string | null;
+  imageUrl: string | null;
+};
+
 export type ChatMessage = {
   id: string;
   conversationId: string;
@@ -33,6 +42,7 @@ export type ChatMessage = {
   author: ChatUser;
   reactions: ReactionSummary[];
   attachments: ChatAttachment[];
+  linkPreviews: ChatLinkPreview[];
 };
 
 export type MessagePage = { messages: ChatMessage[]; nextCursor: string | null };

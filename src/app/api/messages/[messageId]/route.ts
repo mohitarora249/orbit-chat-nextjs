@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { isWorkspaceAdmin, requireMessageAccess } from "@/lib/access";
-import { messageSelect, serializeMessage } from "@/lib/messages";
+import { messageSelect, serializeMessage, syncMessageLinks } from "@/lib/messages";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
 import { HttpError, jsonError, parseJson, routeError } from "@/lib/http";
@@ -34,9 +34,10 @@ export async function PATCH(request: NextRequest, context: Context) {
     }
 
     const updated = await prisma.$transaction(async tx => {
-      const result = await tx.message.update({ where: { id: message.id }, data: { body, editedAt: new Date() }, select: messageSelect });
+      await tx.message.update({ where: { id: message.id }, data: { body, editedAt: new Date() } });
+      await syncMessageLinks(tx, message.id, body);
       await enqueue(tx, "message.updated", { messageId: message.id });
-      return result;
+      return tx.message.findUniqueOrThrow({ where: { id: message.id }, select: messageSelect });
     });
     notifyOutbox();
     return NextResponse.json({ message: serializeMessage(updated) });

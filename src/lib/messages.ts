@@ -1,6 +1,8 @@
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
-import type { ChatMessage, ReactionSummary } from "./types";
+import { extractLinks } from "./links";
+import { enqueue } from "./outbox";
+import type { ChatLinkPreview, ChatMessage, ReactionSummary } from "./types";
 
 // The public message shape. Anything sent to clients (API or socket) must go through this select.
 export const messageSelect = {
@@ -20,6 +22,10 @@ export const messageSelect = {
   attachments: {
     select: { id: true, fileName: true, contentType: true, size: true, status: true },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }]
+  },
+  links: {
+    select: { url: true, preview: { select: { status: true, title: true, description: true, siteName: true, imageUrl: true } } },
+    orderBy: { position: "asc" }
   }
 } satisfies Prisma.MessageSelect;
 
@@ -29,6 +35,11 @@ function groupReactions(reactions: SelectedMessage["reactions"]): ReactionSummar
   const byEmoji = new Map<string, string[]>();
   for (const { emoji, userId } of reactions) byEmoji.set(emoji, [...(byEmoji.get(emoji) ?? []), userId]);
   return [...byEmoji].map(([emoji, userIds]) => ({ emoji, userIds }));
+}
+
+// Links still being fetched, or that had nothing to show, have no preview.
+function linkPreviews(links: SelectedMessage["links"]): ChatLinkPreview[] {
+  return links.flatMap(({ url, preview: { status, ...preview } }) => status === "OK" ? [{ url, ...preview }] : []);
 }
 
 // Deleted messages are kept as tombstones (so threads and reconnect sync stay consistent) but carry no content.
@@ -48,8 +59,20 @@ export function serializeMessage(message: SelectedMessage): ChatMessage {
     deletedAt: message.deletedAt?.toISOString() ?? null,
     author: message.author,
     reactions: deleted ? [] : groupReactions(message.reactions),
-    attachments: deleted ? [] : message.attachments
+    attachments: deleted ? [] : message.attachments,
+    linkPreviews: deleted ? [] : linkPreviews(message.links)
   };
+}
+
+// Records the links in a message body and queues their unfurl (src/lib/unfurl.ts). Call it with the
+// transaction that writes the body, on create and on edit.
+export async function syncMessageLinks(tx: Prisma.TransactionClient, messageId: string, body: string) {
+  const urls = extractLinks(body);
+  await tx.messageLink.deleteMany({ where: { messageId } });
+  if (!urls.length) return;
+  await tx.linkPreview.createMany({ data: urls.map(url => ({ url })), skipDuplicates: true });
+  await tx.messageLink.createMany({ data: urls.map((url, position) => ({ messageId, position, url })) });
+  await enqueue(tx, "message.unfurl", { messageId });
 }
 
 // Opaque pagination cursor: clients pass it back verbatim and must not parse it.

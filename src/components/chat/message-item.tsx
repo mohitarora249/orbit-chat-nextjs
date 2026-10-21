@@ -5,9 +5,10 @@ import { AlertTriangle, Download, FileText, Loader2, MessageSquareText, Pencil, 
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
+import { parseLinks } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets, parseMentions } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
-import type { ChatAttachment, ChatMessage, ChatUser } from "@/lib/types";
+import type { ChatAttachment, ChatLinkPreview, ChatMessage, ChatUser } from "@/lib/types";
 
 const INLINE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -27,12 +28,25 @@ type Props = MessageActions & {
   highlighted?: boolean;
 };
 
+// Links open in a new tab without telling the site where they came from. parseLinks only yields http(s) URLs.
+const LINK_REL = "noopener noreferrer nofollow";
+
+function TextWithLinks({ text }: { text: string }) {
+  return (
+    <>
+      {parseLinks(text).map((part, index) => typeof part === "string"
+        ? <Fragment key={index}>{part}</Fragment>
+        : <a key={index} href={part.url} target="_blank" rel={LINK_REL} className="text-brand-600 underline decoration-brand-200 underline-offset-2 transition hover:decoration-brand-500">{part.url}</a>)}
+    </>
+  );
+}
+
 // Renders text with mention tokens shown as the person's current name. Plain React text nodes only, never HTML.
 function MessageBody({ body, usersById, meId }: { body: string; usersById: Map<string, ChatUser>; meId: string }) {
   return (
     <>
       {parseMentions(body).map((part, index) => {
-        if (typeof part === "string") return <Fragment key={index}>{part}</Fragment>;
+        if (typeof part === "string") return <TextWithLinks key={index} text={part}/>;
         const forMe = part.kind !== "user" || part.userId === meId;
         const label = part.kind === "user" ? usersById.get(part.userId)?.displayName ?? "unknown user" : part.kind;
         return <span key={index} className={cn("rounded px-0.5 font-semibold", forMe ? "bg-amber-200/80 text-amber-950" : "bg-brand-50 text-brand-700")}>@{label}</span>;
@@ -72,6 +86,24 @@ function AttachmentView({ attachment }: { attachment: ChatAttachment }) {
   return attachment.status === "CLEAN"
     ? <a href={href} className={cn(className, "hover:border-zinc-300 hover:bg-zinc-50")}>{content}</a>
     : <div className={className}>{content}</div>;
+}
+
+function LinkPreviewCard({ preview }: { preview: ChatLinkPreview }) {
+  const [showImage, setShowImage] = useState(true);
+  const site = preview.siteName ?? new URL(preview.url).hostname.replace(/^www\./, "");
+  return (
+    <a href={preview.url} target="_blank" rel={LINK_REL} className="flex w-full max-w-md gap-3 rounded-lg border border-l-[3px] border-zinc-200 border-l-zinc-300 bg-white px-3 py-2.5 transition hover:border-zinc-300 hover:border-l-brand-400 hover:bg-zinc-50">
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[11px] font-medium text-zinc-400">{site}</span>
+        {preview.title && <span className="line-clamp-2 text-[13px] font-semibold leading-5 text-brand-700">{preview.title}</span>}
+        {preview.description && <span className="mt-0.5 line-clamp-3 text-xs leading-5 text-zinc-600">{preview.description}</span>}
+      </span>
+      {preview.imageUrl && showImage && (
+        // eslint-disable-next-line @next/next/no-img-element -- third-party image; no-referrer keeps the conversation URL private
+        <img src={preview.imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setShowImage(false)} className="h-16 w-16 shrink-0 rounded-md bg-zinc-100 object-cover"/>
+      )}
+    </a>
+  );
 }
 
 function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, onReact, onEdit, onDelete, onOpenThread }: Props) {
@@ -143,6 +175,9 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
               {message.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(message.editedAt)} at ${timeLabel(message.editedAt)}`}>(edited)</span>}
             </p>
           )
+        )}
+        {!deleted && !editing && message.linkPreviews.length > 0 && (
+          <div className="mt-1.5 flex flex-col gap-2">{message.linkPreviews.map(preview => <LinkPreviewCard key={preview.url} preview={preview}/>)}</div>
         )}
         {!deleted && message.attachments.length > 0 && (
           <div className="mt-1.5 flex flex-col gap-2">{message.attachments.map(attachment => <AttachmentView key={attachment.id} attachment={attachment}/>)}</div>

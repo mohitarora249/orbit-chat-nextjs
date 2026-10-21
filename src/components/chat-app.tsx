@@ -482,7 +482,7 @@ export function ChatApp() {
     const optimistic: ChatMessage = {
       id: `optimistic-${clientMessageId}`, conversationId, authorId: state.me.id, clientMessageId, body, parentId,
       replyCount: 0, lastReplyAt: null, createdAt: new Date().toISOString(), editedAt: null, deletedAt: null,
-      author: { id: state.me.id, displayName: state.me.displayName, avatarColor: state.me.avatarColor }, reactions: [], attachments
+      author: { id: state.me.id, displayName: state.me.displayName, avatarColor: state.me.avatarColor }, reactions: [], attachments, linkPreviews: []
     };
     const place = (message: ChatMessage) => {
       if (parentId) setThread(current => current?.parentId === parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);

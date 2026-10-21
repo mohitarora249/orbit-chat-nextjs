@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 export type OutboxPayloads = {
   "message.created": { messageId: string };
   "message.updated": { messageId: string };
+  "message.unfurl": { messageId: string };
   "conversation.created": { conversationId: string };
   "conversation.read": { conversationId: string; userId: string; lastReadAt: string };
   "attachment.scan": { attachmentId: string };

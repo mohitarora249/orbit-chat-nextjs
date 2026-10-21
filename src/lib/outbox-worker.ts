@@ -6,6 +6,7 @@ import { outboxSignal, type OutboxEventType, type OutboxPayloads } from "./outbo
 import { serializeStatus, statusSelect } from "./presence";
 import { deleteObject, openObject } from "./storage";
 import { scanFile } from "./scanner";
+import { refreshPreviews } from "./unfurl";
 
 type Handlers = { [T in OutboxEventType]: (payload: OutboxPayloads[T]) => Promise<void> };
 type ClaimedEvent = { id: bigint; type: OutboxEventType; payload: unknown; attempts: number };
@@ -28,6 +29,11 @@ function createHandlers(io: Server): Handlers {
       if (reply?.parentId) await emitMessage(io, reply.parentId, "message:updated");
     },
     "message.updated": ({ messageId }) => emitMessage(io, messageId, "message:updated"),
+    // Fetch failures are stored as FAILED previews, not thrown, so only database errors are retried.
+    "message.unfurl": async ({ messageId }) => {
+      const links = await prisma.messageLink.findMany({ where: { messageId }, select: { url: true } });
+      if (await refreshPreviews(links.map(link => link.url))) await emitMessage(io, messageId, "message:updated");
+    },
     "conversation.created": async ({ conversationId }) => {
       const found = await getConversationSummary(conversationId);
       if (!found) return;
@@ -104,7 +110,9 @@ export function startOutboxWorker(io: Server) {
     // Realtime fan-out is fast and ordering matters, so it runs one event at a time.
     { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.read", "user.status"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
     // Scans are slow; keep them off the realtime lane so they never delay message delivery.
-    { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 }
+    { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 },
+    // Link previews wait on other people's servers (up to 5 seconds per link), so they get their own lane too.
+    { name: "unfurl", types: ["message.unfurl"], batchSize: 8, leaseSeconds: 60, concurrency: 4 }
   ];
   let stopped = false;
   const timers: NodeJS.Timeout[] = [];
