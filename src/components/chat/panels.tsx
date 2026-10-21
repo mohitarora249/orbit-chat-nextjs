@@ -8,6 +8,7 @@ import { MessageItem, type MessageActions } from "@/components/chat/message-item
 import { dayLabel, isGrouped, timeLabel } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { mentionsToText } from "@/lib/mentions";
+import { customStatus, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import type { ActivityItem, ChatAttachment, ChatMessage, ChatUser } from "@/lib/types";
 
 function PanelShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode }) {
@@ -112,15 +113,40 @@ export function ActivityPanel({ usersById, conversationName, onOpen, onClose }: 
   );
 }
 
-export function PeoplePanel({ users, meId, online, onOpenDm, onClose }: { users: ChatUser[]; meId: string; online: Set<string>; onOpenDm: (userId: string) => void; onClose: () => void }) {
-  const sorted = [...users].sort((a, b) => Number(online.has(b.id)) - Number(online.has(a.id)) || a.displayName.localeCompare(b.displayName));
+function PersonStatus({ presence, status, now }: { presence: Presence; status: UserStatus | undefined; now: number }) {
+  const custom = customStatus(status, now);
+  const dnd = isDnd(status, now);
   return (
-    <PanelShell title="People" subtitle={`${online.size} online · ${users.length} members`} onClose={onClose}>
+    <div className="truncate text-[11px] text-zinc-400">
+      {custom ? <span className="text-zinc-600">{custom.emoji} {custom.text}</span> : presenceLabels[presence]}
+      {dnd && <span className="text-rose-500"> · Notifications paused{status?.dndUntil ? ` until ${untilLabel(status.dndUntil)}` : ""}</span>}
+    </div>
+  );
+}
+
+const presenceRank: Record<Presence, number> = { active: 0, away: 1, offline: 2 };
+
+export function PeoplePanel({ users, meId, presenceOf, statusOf, now, onOpenDm, onClose }: {
+  users: ChatUser[];
+  meId: string;
+  presenceOf: (userId: string) => Presence;
+  statusOf: (userId: string) => UserStatus | undefined;
+  now: number;
+  onOpenDm: (userId: string) => void;
+  onClose: () => void;
+}) {
+  const sorted = [...users].sort((a, b) => presenceRank[presenceOf(a.id)] - presenceRank[presenceOf(b.id)] || a.displayName.localeCompare(b.displayName));
+  const online = users.filter(user => presenceOf(user.id) !== "offline").length;
+  return (
+    <PanelShell title="People" subtitle={`${online} online · ${users.length} members`} onClose={onClose}>
       <div className="flex-1 space-y-1 overflow-y-auto p-3">
         {sorted.map(user => (
           <button key={user.id} onClick={() => onOpenDm(user.id)} className="flex w-full items-center gap-3 rounded-lg p-2 text-left transition hover:bg-zinc-50">
-            <Avatar name={user.displayName} color={user.avatarColor} size="sm" online={online.has(user.id)}/>
-            <div className="min-w-0"><div className="truncate text-[13px] font-medium">{user.displayName}{user.id === meId && <span className="font-normal text-zinc-400"> (you)</span>}</div><div className="text-[11px] text-zinc-400">{online.has(user.id) ? "Online" : "Offline"}</div></div>
+            <Avatar name={user.displayName} color={user.avatarColor} size="sm" presence={presenceOf(user.id)} dnd={isDnd(statusOf(user.id), now)}/>
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-medium">{user.displayName}{user.id === meId && <span className="font-normal text-zinc-400"> (you)</span>}</div>
+              <PersonStatus presence={presenceOf(user.id)} status={statusOf(user.id)} now={now}/>
+            </div>
           </button>
         ))}
       </div>

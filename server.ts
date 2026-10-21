@@ -9,6 +9,7 @@ import { auth } from "./src/lib/auth";
 import { visibleConversationsWhere } from "./src/lib/access";
 import { startOutboxWorker } from "./src/lib/outbox-worker";
 import { ensureBucket, storageConfigured } from "./src/lib/storage";
+import type { Presence } from "./src/lib/presence";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = process.env.HOSTNAME || "0.0.0.0";
@@ -70,8 +71,19 @@ async function start() {
 
   const workspaceRooms = (socket: Socket) => [...socket.rooms].filter(room => room.startsWith("workspace:"));
 
-  async function isOnline(userId: string) {
-    return (await io.in(`user:${userId}`).fetchSockets()).length > 0;
+  // Active if any of the user's tabs, on any instance, has seen input recently; away if all are idle.
+  async function presenceOf(userId: string): Promise<Presence> {
+    const sockets = await io.in(`user:${userId}`).fetchSockets();
+    if (!sockets.length) return "offline";
+    return sockets.some(other => !other.data.idle) ? "active" : "away";
+  }
+
+  async function announcePresence(userId: string, rooms: string[]) {
+    try {
+      if (rooms.length) io.to(rooms).emit("presence:update", { userId, presence: await presenceOf(userId) });
+    } catch (error) {
+      console.error("Presence update failed", error);
+    }
   }
 
   io.on("connection", async socket => {
@@ -87,23 +99,31 @@ async function start() {
       clearTimeout(expireTimer);
       clearInterval(recheckTimer);
       const rooms = workspaceRooms(socket);
-      setTimeout(async () => {
-        try {
-          if (rooms.length && !(await isOnline(userId))) io.to(rooms).emit("presence:update", { userId, online: false });
-        } catch (error) {
-          console.error("Presence update failed", error);
-        }
-      }, OFFLINE_GRACE_MS);
+      // Re-announce rather than assume offline: closing an active tab can leave only idle ones (away).
+      setTimeout(() => void announcePresence(userId, rooms), OFFLINE_GRACE_MS);
     });
 
-    socket.on("presence:list", async (_payload: unknown, ack?: (userIds: string[]) => void) => {
+    socket.on("presence:list", async (_payload: unknown, ack?: (presence: Record<string, Presence>) => void) => {
       if (typeof ack !== "function") return;
       try {
         const sockets = await io.in(workspaceRooms(socket)).fetchSockets();
-        ack([...new Set(sockets.map(other => other.data.userId as string))]);
+        const presence: Record<string, Presence> = {};
+        for (const other of sockets) {
+          const id = other.data.userId as string;
+          if (presence[id] !== "active") presence[id] = other.data.idle ? "away" : "active";
+        }
+        ack(presence);
       } catch {
-        ack([]);
+        ack({});
       }
+    });
+
+    // The browser reports when this tab has had no input for a while (and when input resumes).
+    socket.on("presence:idle", (payload: { idle?: boolean }) => {
+      const idle = Boolean(payload?.idle);
+      if (Boolean(socket.data.idle) === idle) return;
+      socket.data.idle = idle;
+      void announcePresence(userId, workspaceRooms(socket));
     });
 
     let lastTyping = 0;
@@ -137,9 +157,8 @@ async function start() {
         ...conversations.map(conversation => `conversation:${conversation.id}`)
       ]);
       socket.emit("session:ready");
-      if (socket.connected && (await io.in(`user:${userId}`).fetchSockets()).length === 1) {
-        io.to(workspaceRooms(socket)).emit("presence:update", { userId, online: true });
-      }
+      // Also covers a new active tab next to idle ones (away -> active).
+      if (socket.connected) await announcePresence(userId, workspaceRooms(socket));
     } catch (error) {
       console.error("Socket room setup failed", error);
       socket.emit("chat:error", { message: "Could not subscribe to your conversations." });

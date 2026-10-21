@@ -16,7 +16,14 @@ to one per second per socket. Clients re-send it every few seconds while the use
 after about 6 seconds without one.
 
 ### `presence:list` (with acknowledgement)
-The acknowledgement is called with the ids of users online in the sender's workspaces.
+The acknowledgement is called with `{ [userId]: "active" | "away" }` for users online in the sender's workspaces.
+
+### `presence:idle`
+```json
+{ "idle": true }
+```
+Sent when this tab has had no input for 10 minutes, and with `false` when input resumes (and again after a
+reconnect if still idle). A user is `away` when all of their sockets are idle, `active` if any is not.
 
 ## Server -> client
 
@@ -30,7 +37,8 @@ thread fields, `editedAt`, and `deletedAt` (a deleted message has an empty body 
 | `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, a thread got a reply, or an attachment scan finished |
 | `conversation:created` | `ConversationSummary` | A channel or DM that the user can see was created |
 | `conversation:read` | `{ conversationId, lastReadAt }` | The same user read a conversation (keeps tabs in sync) |
-| `presence:update` | `{ userId, online }` | A user's first socket connected, or their last one disconnected (after a 5-second grace period) |
+| `presence:update` | `{ userId, presence }` (`"active"`, `"away"` or `"offline"`) | A user's socket connected, went idle or active, or disconnected (after a 5-second grace period). May repeat the current value |
+| `status:update` | `{ userId, status }` (`UserStatus` or `null`) | A user changed their custom status or Do Not Disturb (via the outbox). Expiry is not announced: clients hide statuses past `expiresAt` / `dndUntil` |
 | `typing` | `{ conversationId, parentId, userId, displayName, typing }` | Another user is typing |
 | `chat:error` | `{ message }` | Room setup failed |
 

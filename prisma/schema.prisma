@@ -28,22 +28,29 @@ enum AttachmentStatus {
 
 // `name` in Better Auth is mapped to `displayName` (see src/lib/auth.ts).
 model User {
-  id             String               @id @default(cuid())
-  displayName    String
-  email          String               @unique
-  emailVerified  Boolean              @default(false)
-  image          String?
-  avatarColor    String               @default("#6D5EF6")
-  createdAt      DateTime             @default(now())
-  updatedAt      DateTime             @default(now()) @updatedAt
-  workspaceLinks WorkspaceMember[]
-  memberships    ConversationMember[]
-  messages       Message[]
-  reactions      Reaction[]
-  readCursors    ReadCursor[]
-  sessions       Session[]
-  accounts       Account[]
-  attachments    Attachment[]
+  id              String               @id @default(cuid())
+  displayName     String
+  email           String               @unique
+  emailVerified   Boolean              @default(false)
+  image           String?
+  avatarColor     String               @default("#6D5EF6")
+  // Custom status; null statusExpiresAt means "don't clear". Expired statuses are ignored, not deleted.
+  statusEmoji     String?
+  statusText      String?
+  statusExpiresAt DateTime?
+  // Do Not Disturb; null dndUntil means "until turned off".
+  dnd             Boolean              @default(false)
+  dndUntil        DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @default(now()) @updatedAt
+  workspaceLinks  WorkspaceMember[]
+  memberships     ConversationMember[]
+  messages        Message[]
+  reactions       Reaction[]
+  readCursors     ReadCursor[]
+  sessions        Session[]
+  accounts        Account[]
+  attachments     Attachment[]
 }
 
 // Better Auth tables.

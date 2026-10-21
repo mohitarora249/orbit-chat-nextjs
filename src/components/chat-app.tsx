@@ -12,10 +12,12 @@ import { Composer } from "@/components/chat/composer";
 import { MessageItem } from "@/components/chat/message-item";
 import { ActivityPanel, PeoplePanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
 import { CommandPalette, CreateChannelDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type NotificationPrefs } from "@/components/chat/dialogs";
+import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
 import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mergeMessages, upsertMessage } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { mentionsMe, mentionsToText } from "@/lib/mentions";
+import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
 import type { ActivityItem, Bootstrap, ChatAttachment, ChatMessage, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
@@ -28,6 +30,8 @@ type MentionToast = { message: ChatMessage; kind: NonNullable<ReturnType<typeof 
 const PAGE_SIZE = 50;
 const TYPING_TTL_MS = 6000;
 const MENTION_TOAST_MS = 8000;
+// How often to re-check idleness and re-render for statuses that expire.
+const PRESENCE_TICK_MS = 30 * 1000;
 // When jumping to an old search result, give up after this many pages of history.
 const MAX_JUMP_PAGES = 10;
 const emptyHistory: History = { messages: [], nextCursor: null, loaded: false };
@@ -54,8 +58,11 @@ export function ChatApp() {
   const [thread, setThread] = useState<ThreadState | null>(null);
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   const [dialog, setDialog] = useState<"palette" | "create" | "help" | null>(null);
-  const [menu, setMenu] = useState<"workspace" | "notifications" | null>(null);
-  const [online, setOnline] = useState<Set<string>>(new Set());
+  const [menu, setMenu] = useState<"workspace" | "notifications" | "status" | null>(null);
+  // Other people's presence; ours is derived from the socket and `idle`.
+  const [presence, setPresence] = useState<Record<string, Presence>>({});
+  const [idle, setIdle] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const [typing, setTyping] = useState<TypingState>({});
   const [socketConnected, setSocketConnected] = useState(false);
   const [notice, setNotice] = useState("");
@@ -78,10 +85,12 @@ export function ChatApp() {
   const threadIdRef = useRef<string | null>(null);
   const bootstrapRef = useRef<Bootstrap | null>(null);
   const prefsRef = useRef(prefs);
+  const idleRef = useRef(false);
   const lastMarkedRef = useRef("");
   const jumpPagesRef = useRef(0);
   bootstrapRef.current = bootstrap;
   prefsRef.current = prefs;
+  idleRef.current = idle;
   threadIdRef.current = thread?.parentId ?? null;
 
   const me = bootstrap?.me ?? null;
@@ -98,6 +107,14 @@ export function ChatApp() {
     setBootstrap(current => current && !current.conversations.some(c => c.id === conversation.id)
       ? { ...current, conversations: [...current.conversations, conversation] }
       : current);
+  }, []);
+
+  const setStatus = useCallback((userId: string, status: UserStatus | null) => {
+    setBootstrap(current => {
+      if (!current) return current;
+      const { [userId]: _previous, ...rest } = current.statuses;
+      return { ...current, statuses: status ? { ...rest, [userId]: status } : rest };
+    });
   }, []);
 
   // ---- Loading -------------------------------------------------------------------------------------------
@@ -270,7 +287,7 @@ export function ChatApp() {
   const notify = useCallback((message: ChatMessage) => {
     const state = bootstrapRef.current;
     const current = prefsRef.current;
-    if (!state || message.authorId === state.me.id || !current.desktop || current.muted.includes(message.conversationId)) return;
+    if (!state || message.authorId === state.me.id || !current.desktop || current.muted.includes(message.conversationId) || isDnd(state.statuses[state.me.id])) return;
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && message.conversationId === activeIdRef.current) return;
     const conversation = state.conversations.find(c => c.id === message.conversationId);
@@ -294,8 +311,10 @@ export function ChatApp() {
       return { ...current, [key]: rest };
     });
     const fromOther = Boolean(state) && message.authorId !== state?.me.id;
-    // Any mention alerts live, @here included: receiving it live means this person is online.
-    const mention = fromOther ? mentionsMe(message.body, state!.me.id) : null;
+    // Any mention alerts live. @here only reaches people who are online and not away.
+    const kind = fromOther ? mentionsMe(message.body, state!.me.id) : null;
+    const mention = kind === "here" && idleRef.current ? null : kind;
+    const dnd = isDnd(state?.statuses[state.me.id]);
     // "Seeing it" means the message landed in what is on screen right now: the open thread for a reply,
     // the open conversation for a top-level message.
     const seeing = document.visibilityState === "visible" && (message.parentId
@@ -315,12 +334,12 @@ export function ChatApp() {
         lastMessage: { body: message.body, createdAt: message.createdAt, author: { displayName: message.author.displayName } }
       }));
     }
-    if (mention && !seeing && !message.id.startsWith("optimistic-")) {
+    if (mention && !seeing && !dnd && !message.id.startsWith("optimistic-")) {
       const conversation = state?.conversations.find(c => c.id === message.conversationId);
       const where = conversation?.type === "DM" ? "a direct message" : `#${conversation?.name ?? "a channel"}`;
       setMentionToast({ message, kind: mention, where: message.parentId ? `a thread in ${where}` : where });
     }
-    if (fromOther && !seeing && !message.id.startsWith("optimistic-") && prefsRef.current.sound && !prefsRef.current.muted.includes(message.conversationId)) {
+    if (fromOther && !seeing && !dnd && !message.id.startsWith("optimistic-") && prefsRef.current.sound && !prefsRef.current.muted.includes(message.conversationId)) {
       const isDm = state?.conversations.find(c => c.id === message.conversationId)?.type === "DM";
       playSound(mention || isDm ? "mention" : "message");
     }
@@ -355,7 +374,8 @@ export function ChatApp() {
       hasConnected = true;
     });
     socket.on("session:ready", () => {
-      socket.emit("presence:list", null, (userIds: string[]) => setOnline(new Set(userIds)));
+      if (idleRef.current) socket.emit("presence:idle", { idle: true });
+      socket.emit("presence:list", null, (list: Record<string, Presence>) => setPresence(list));
     });
     socket.on("connect_error", error => {
       if (error.message === "unauthorized") window.location.assign("/login");
@@ -367,13 +387,10 @@ export function ChatApp() {
     socket.on("conversation:read", ({ conversationId, lastReadAt }: { conversationId: string; lastReadAt: string }) => {
       updateConversation(conversationId, c => ({ ...c, unreadCount: 0, mentionCount: 0, lastReadAt: c.lastReadAt && c.lastReadAt > lastReadAt ? c.lastReadAt : lastReadAt }));
     });
-    socket.on("presence:update", ({ userId, online: isOnline }: { userId: string; online: boolean }) => {
-      setOnline(current => {
-        const next = new Set(current);
-        if (isOnline) next.add(userId); else next.delete(userId);
-        return next;
-      });
+    socket.on("presence:update", ({ userId, presence: next }: { userId: string; presence: Presence }) => {
+      setPresence(current => current[userId] === next ? current : { ...current, [userId]: next });
     });
+    socket.on("status:update", ({ userId, status }: { userId: string; status: UserStatus | null }) => setStatus(userId, status));
     socket.on("typing", (event: { conversationId: string; parentId: string | null; userId: string; displayName: string; typing: boolean }) => {
       if (event.userId === meId) return;
       const key = typingKey(event.conversationId, event.parentId);
@@ -389,7 +406,33 @@ export function ChatApp() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, updateConversation]);
+  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, updateConversation, setStatus]);
+
+  // Idle detection: no input in this tab for IDLE_AFTER_MS makes it idle. The server combines all of a
+  // person's tabs, so they show as away only when every tab is idle.
+  useEffect(() => {
+    let lastInput = Date.now();
+    const update = (value: boolean) => {
+      if (idleRef.current === value) return;
+      idleRef.current = value;
+      setIdle(value);
+      socketRef.current?.emit("presence:idle", { idle: value });
+    };
+    const onInput = () => { lastInput = Date.now(); update(false); };
+    const onVisible = () => { if (document.visibilityState === "visible") onInput(); };
+    const events = ["pointerdown", "pointermove", "keydown", "wheel", "focus"] as const;
+    events.forEach(name => window.addEventListener(name, onInput, { passive: true }));
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      if (Date.now() - lastInput >= IDLE_AFTER_MS) update(true);
+    }, PRESENCE_TICK_MS);
+    return () => {
+      events.forEach(name => window.removeEventListener(name, onInput));
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(timer);
+    };
+  }, []);
 
   // Expire typing indicators whose sender went quiet without sending "stopped".
   useEffect(() => {
@@ -587,6 +630,17 @@ export function ChatApp() {
     window.location.assign("/login");
   }
 
+  async function saveStatus(patch: StatusPatch) {
+    try {
+      const { status } = await api<{ status: UserStatus | null }>("/api/status", { method: "PATCH", json: patch });
+      if (me) setStatus(me.id, status);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update your status.");
+      return false;
+    }
+  }
+
   function savePrefs(next: NotificationPrefs) {
     setPrefs(next);
     try { if (me) localStorage.setItem(`orbit-chat-notify:${me.id}`, JSON.stringify(next)); } catch { /* storage unavailable */ }
@@ -634,6 +688,26 @@ export function ChatApp() {
   const mentionable = bootstrap.users
     .filter(user => user.id !== me.id && (!activeConversation || (activeConversation.type === "CHANNEL" && !activeConversation.isPrivate) || activeConversation.memberIds.includes(user.id)))
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const presenceOf = (userId: string): Presence => userId === me.id
+    ? socketConnected ? idle ? "away" : "active" : "offline"
+    : presence[userId] ?? "offline";
+  const statusOf = (userId: string) => bootstrap.statuses[userId];
+  const myStatus = customStatus(statusOf(me.id), now);
+  const myDnd = isDnd(statusOf(me.id), now);
+  const statusEmoji = (userId: string) => {
+    const status = customStatus(statusOf(userId), now);
+    return status?.emoji && <span title={status.text ?? undefined} className="shrink-0 text-[13px] leading-none">{status.emoji}</span>;
+  };
+  // "Away · 📅 In a meeting · Notifications paused until 3:30 PM"
+  const partnerLine = (userId: string) => {
+    const status = statusOf(userId);
+    const custom = customStatus(status, now);
+    return [
+      presenceLabels[presenceOf(userId)],
+      custom && [custom.emoji, custom.text].filter(Boolean).join(" "),
+      isDnd(status, now) && (status?.dndUntil ? `Notifications paused until ${untilLabel(status.dndUntil)}` : "Notifications paused")
+    ].filter(Boolean).join(" · ");
+  };
   const firstUnread = unreadMarker === null ? undefined : history.messages.find(m => m.createdAt > unreadMarker && m.authorId !== me.id && !isOptimistic(m));
   const countLabel = (count: number) => count >= 100 ? "99+" : count;
   const mentionBadge = (count: number) => (
@@ -711,8 +785,9 @@ export function ChatApp() {
               const unread = dm !== undefined && (dm.unreadCount > 0 || dm.mentionCount > 0) && !active;
               return (
                 <button key={user.id} onClick={() => void openDm(user.id)} className={navItem(active, unread)}>
-                  <Avatar name={user.displayName} color={user.avatarColor} size="sm" online={user.id === me.id ? socketConnected : online.has(user.id)}/>
+                  <Avatar name={user.displayName} color={user.avatarColor} size="sm" presence={presenceOf(user.id)} dnd={isDnd(statusOf(user.id), now)}/>
                   <span className="truncate">{user.displayName}{user.id === me.id && <span className="font-normal text-zinc-400"> (you)</span>}</span>
+                  {statusEmoji(user.id)}
                   {dm && !active && unreadBadge(dm, prefs.muted.includes(dm.id))}
                 </button>
               );
@@ -720,13 +795,21 @@ export function ChatApp() {
           </div>
         </div>
 
-        <div className="border-t border-zinc-200/80 p-2">
-          <div className="flex items-center gap-2.5 rounded-lg p-1.5">
-            <Avatar name={me.displayName} color={me.avatarColor}/>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-medium">{me.displayName}</div>
-              <div className="flex items-center gap-1.5 text-[11px] text-zinc-500"><span className={cn("h-1.5 w-1.5 rounded-full", socketConnected ? "bg-emerald-500" : "animate-pulse bg-amber-400")}/>{socketConnected ? "Online" : "Connecting…"}</div>
-            </div>
+        <div className="relative border-t border-zinc-200/80 p-2">
+          {menu === "status" && <StatusMenu me={me} status={statusOf(me.id)} presence={presenceOf(me.id)} onSave={saveStatus} onClose={() => setMenu(null)}/>}
+          <div className="flex items-center gap-1 rounded-lg">
+            <button onClick={() => setMenu(current => current === "status" ? null : "status")} aria-expanded={menu === "status"} title="Set a status" className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg p-1.5 text-left transition hover:bg-zinc-200/50">
+              <Avatar name={me.displayName} color={me.avatarColor} presence={socketConnected ? presenceOf(me.id) : undefined} dnd={myDnd}/>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] font-medium">{me.displayName}</div>
+                <div className="flex items-center gap-1.5 truncate text-[11px] text-zinc-500">
+                  {!socketConnected ? <><span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400"/>Connecting…</>
+                    : myStatus ? <><span>{myStatus.emoji}</span><span className="truncate">{myStatus.text ?? presenceLabels[presenceOf(me.id)]}</span></>
+                    : myDnd ? "Notifications paused"
+                    : <span className="text-zinc-400">{presenceLabels[presenceOf(me.id)]} · Set a status</span>}
+                </div>
+              </div>
+            </button>
             <button title="Help & shortcuts" aria-label="Help and shortcuts" onClick={() => setDialog("help")} className={cn(iconAction, "p-1.5")}><HelpCircle size={15}/></button>
             <button title="Sign out" aria-label="Sign out" onClick={() => void signOut()} className={cn(iconAction, "p-1.5")}><LogOut size={15}/></button>
           </div>
@@ -737,12 +820,12 @@ export function ChatApp() {
         <header className="flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200/80 px-3 sm:px-5">
           <Button variant="ghost" size="icon" title="Channels" aria-label="Open channel list" onClick={() => setShowSidebar(true)} className="h-8 w-8 shrink-0 md:hidden"><Menu size={18}/></Button>
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            {activePartner ? <Avatar name={activePartner.displayName} color={activePartner.avatarColor} size="sm" online={activePartner.id === me.id ? socketConnected : online.has(activePartner.id)}/>
+            {activePartner ? <Avatar name={activePartner.displayName} color={activePartner.avatarColor} size="sm" presence={presenceOf(activePartner.id)} dnd={isDnd(statusOf(activePartner.id), now)}/>
               : activeConversation?.isPrivate ? <Lock size={15} className="shrink-0 text-zinc-400"/> : <Hash size={16} className="shrink-0 text-zinc-400"/>}
             <h1 className="truncate text-[15px] font-semibold tracking-tight">{activeLabel}</h1>
             <span className="hidden min-w-0 truncate border-l border-zinc-200 pl-2.5 text-[13px] text-zinc-400 sm:block">
               {activePartner
-                ? activePartner.id === me.id || online.has(activePartner.id) ? "Online" : "Offline"
+                ? partnerLine(activePartner.id)
                 : activeConversation?.topic || (activeConversation?.isPrivate ? "Private channel" : "Channel")}
             </span>
             {!socketConnected && <span className="ml-1 flex shrink-0 items-center gap-1.5 rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500"/>Reconnecting</span>}
@@ -835,7 +918,7 @@ export function ChatApp() {
       {rightPanel === "activity" && (
         <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>
       )}
-      {rightPanel === "people" && <PeoplePanel users={bootstrap.users} meId={me.id} online={new Set([...online, ...(socketConnected ? [me.id] : [])])} onOpenDm={userId => { setRightPanel(null); void openDm(userId); }} onClose={() => setRightPanel(null)}/>}
+      {rightPanel === "people" && <PeoplePanel users={bootstrap.users} meId={me.id} presenceOf={presenceOf} statusOf={statusOf} now={now} onOpenDm={userId => { setRightPanel(null); void openDm(userId); }} onClose={() => setRightPanel(null)}/>}
 
       {mentionToast && (
         <div role="status" aria-live="polite" className="fixed right-4 top-16 z-40 w-[min(360px,calc(100vw-2rem))] animate-pop-in">

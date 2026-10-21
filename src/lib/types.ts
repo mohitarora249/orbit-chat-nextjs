@@ -1,3 +1,5 @@
+import type { UserStatus } from "./presence";
+
 export type ChatUser = {
   id: string;
   displayName: string;
@@ -54,6 +56,8 @@ export type ConversationSummary = {
 export type Bootstrap = {
   me: ChatUser & { email: string };
   users: ChatUser[];
+  // Custom statuses and Do Not Disturb in effect, by user id (see src/lib/presence.ts).
+  statuses: Record<string, UserStatus>;
   workspace: { id: string; name: string; slug: string; role: "OWNER" | "ADMIN" | "MEMBER" };
   conversations: ConversationSummary[];
 };

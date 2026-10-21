@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 import { messageSelect, serializeMessage } from "./messages";
 import { getConversationSummary } from "./conversations";
 import { outboxSignal, type OutboxEventType, type OutboxPayloads } from "./outbox";
+import { serializeStatus, statusSelect } from "./presence";
 import { deleteObject, openObject } from "./storage";
 import { scanFile } from "./scanner";
 
@@ -44,6 +45,12 @@ function createHandlers(io: Server): Handlers {
     "conversation.read": async ({ conversationId, userId, lastReadAt }) => {
       // Keeps the user's other tabs and devices in sync.
       io.to(`user:${userId}`).emit("conversation:read", { conversationId, lastReadAt });
+    },
+    "user.status": async ({ userId }) => {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { ...statusSelect, workspaceLinks: { select: { workspaceId: true } } } });
+      if (!user) return;
+      const rooms = user.workspaceLinks.map(link => `workspace:${link.workspaceId}`);
+      if (rooms.length) io.to(rooms).emit("status:update", { userId, status: serializeStatus(user) });
     },
     "attachment.scan": async ({ attachmentId }) => {
       const attachment = await prisma.attachment.findUnique({ where: { id: attachmentId } });
@@ -95,7 +102,7 @@ export function startOutboxWorker(io: Server) {
   const handlers = createHandlers(io);
   const lanes: Lane[] = [
     // Realtime fan-out is fast and ordering matters, so it runs one event at a time.
-    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.read"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
+    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.read", "user.status"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
     // Scans are slow; keep them off the realtime lane so they never delay message delivery.
     { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 }
   ];

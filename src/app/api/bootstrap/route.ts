@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/session";
 import { getPrimaryWorkspaceLink } from "@/lib/workspace";
 import { listConversations } from "@/lib/conversations";
 import { jsonError, routeError } from "@/lib/http";
+import { serializeStatus, statusSelect } from "@/lib/presence";
 import type { Bootstrap } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -18,13 +19,17 @@ export async function GET(request: NextRequest) {
       prisma.workspaceMember.findMany({
         where: { workspaceId: workspaceLink.workspaceId },
         orderBy: [{ user: { displayName: "asc" } }, { userId: "asc" }],
-        select: { user: { select: { id: true, displayName: true, avatarColor: true } } }
+        select: { user: { select: { id: true, displayName: true, avatarColor: true, ...statusSelect } } }
       }),
       listConversations(user.id, workspaceLink.workspaceId)
     ]);
     const body: Bootstrap = {
       me: { id: user.id, displayName: user.displayName, avatarColor: user.avatarColor, email: user.email },
-      users: members.map(member => member.user),
+      users: members.map(({ user: { id, displayName, avatarColor } }) => ({ id, displayName, avatarColor })),
+      statuses: Object.fromEntries(members.flatMap(({ user }) => {
+        const status = serializeStatus(user);
+        return status ? [[user.id, status]] : [];
+      })),
       workspace: { id: workspaceLink.workspace.id, name: workspaceLink.workspace.name, slug: workspaceLink.workspace.slug, role: workspaceLink.role },
       conversations
     };
