@@ -12,9 +12,10 @@ import { Composer } from "@/components/chat/composer";
 import { MessageItem } from "@/components/chat/message-item";
 import { ActivityPanel, PeoplePanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
 import { CommandPalette, CreateChannelDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type NotificationPrefs } from "@/components/chat/dialogs";
-import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mentionsUser, mergeMessages, upsertMessage } from "@/components/chat/helpers";
+import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mergeMessages, upsertMessage } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
+import { mentionsMe, mentionsToText } from "@/lib/mentions";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
 import type { ActivityItem, Bootstrap, ChatAttachment, ChatMessage, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
@@ -22,7 +23,7 @@ import type { ActivityItem, Bootstrap, ChatAttachment, ChatMessage, Conversation
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
 type RightPanel = "thread" | "activity" | "people" | null;
-type MentionToast = { message: ChatMessage; where: string };
+type MentionToast = { message: ChatMessage; kind: NonNullable<ReturnType<typeof mentionsMe>>; where: string };
 
 const PAGE_SIZE = 50;
 const TYPING_TTL_MS = 6000;
@@ -273,10 +274,10 @@ export function ChatApp() {
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && message.conversationId === activeIdRef.current) return;
     const conversation = state.conversations.find(c => c.id === message.conversationId);
-    const mentionsMe = mentionsUser(message.body, state.me.displayName);
-    if (!mentionsMe && conversation?.type !== "DM") return;
+    if (!mentionsMe(message.body, state.me.id) && conversation?.type !== "DM") return;
     const where = conversation?.type === "DM" ? "" : ` in #${conversation?.name ?? "a channel"}`;
-    const notification = new Notification(`${message.author.displayName}${where}`, { body: message.body || "Sent an attachment", tag: message.id });
+    const body = mentionsToText(message.body, id => state.users.find(user => user.id === id)?.displayName);
+    const notification = new Notification(`${message.author.displayName}${where}`, { body: body || "Sent an attachment", tag: message.id });
     notification.onclick = () => {
       window.focus();
       setActiveId(message.conversationId);
@@ -293,7 +294,8 @@ export function ChatApp() {
       return { ...current, [key]: rest };
     });
     const fromOther = Boolean(state) && message.authorId !== state?.me.id;
-    const mentionsMe = fromOther && mentionsUser(message.body, state!.me.displayName);
+    // Any mention alerts live, @here included: receiving it live means this person is online.
+    const mention = fromOther ? mentionsMe(message.body, state!.me.id) : null;
     // "Seeing it" means the message landed in what is on screen right now: the open thread for a reply,
     // the open conversation for a top-level message.
     const seeing = document.visibilityState === "visible" && (message.parentId
@@ -301,7 +303,7 @@ export function ChatApp() {
       : message.conversationId === activeIdRef.current);
     if (message.parentId) {
       setThread(current => current && current.parentId === message.parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
-      if (mentionsMe && !seeing) updateConversation(message.conversationId, c => ({ ...c, mentionCount: c.mentionCount + 1 }));
+      if (mention && !seeing) updateConversation(message.conversationId, c => ({ ...c, mentionCount: c.mentionCount + 1 }));
     } else {
       const viewing = message.conversationId === activeIdRef.current;
       if (viewing) setHistory(current => ({ ...current, messages: upsertMessage(current.messages, message) }));
@@ -309,18 +311,18 @@ export function ChatApp() {
       updateConversation(message.conversationId, c => ({
         ...c,
         unreadCount: counts ? c.unreadCount + 1 : c.unreadCount,
-        mentionCount: counts && mentionsMe ? c.mentionCount + 1 : c.mentionCount,
+        mentionCount: counts && mention ? c.mentionCount + 1 : c.mentionCount,
         lastMessage: { body: message.body, createdAt: message.createdAt, author: { displayName: message.author.displayName } }
       }));
     }
-    if (mentionsMe && !seeing && !message.id.startsWith("optimistic-")) {
+    if (mention && !seeing && !message.id.startsWith("optimistic-")) {
       const conversation = state?.conversations.find(c => c.id === message.conversationId);
       const where = conversation?.type === "DM" ? "a direct message" : `#${conversation?.name ?? "a channel"}`;
-      setMentionToast({ message, where: message.parentId ? `a thread in ${where}` : where });
+      setMentionToast({ message, kind: mention, where: message.parentId ? `a thread in ${where}` : where });
     }
     if (fromOther && !seeing && !message.id.startsWith("optimistic-") && prefsRef.current.sound && !prefsRef.current.muted.includes(message.conversationId)) {
       const isDm = state?.conversations.find(c => c.id === message.conversationId)?.type === "DM";
-      playSound(mentionsMe || isDm ? "mention" : "message");
+      playSound(mention || isDm ? "mention" : "message");
     }
     notify(message);
   }, [notify, updateConversation]);
@@ -815,7 +817,7 @@ export function ChatApp() {
           <div className="mx-auto max-w-3xl">
             {activeConversation && (
               <Composer key={activeConversation.id} conversationId={activeConversation.id} placeholder={`Message ${activePartner ? activeLabel : `#${activeLabel}`}`}
-                typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} onTyping={onChannelTyping} onNotice={setNotice}
+                typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={onChannelTyping} onNotice={setNotice}
                 onSend={(body, attachments) => sendMessage(activeConversation.id, null, body, attachments)}/>
             )}
           </div>
@@ -826,12 +828,12 @@ export function ChatApp() {
       {rightPanel === "thread" && thread && (
         <ThreadPanel thread={thread} conversationName={activePartner ? activeLabel : `#${activeLabel}`} me={me} canModerate={canModerate} usersById={usersById}
           typingText={typingText(thread.parent?.conversationId ?? activeId ?? "", thread.parentId)} highlightId={highlightId} mentionable={mentionable}
-          onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
+          broadcastMentions={activeConversation?.type === "CHANNEL"} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
           onSend={(body, attachments) => sendMessage(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, body, attachments)}
           onTyping={onThreadTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete}/>
       )}
       {rightPanel === "activity" && (
-        <ActivityPanel conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>
+        <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>
       )}
       {rightPanel === "people" && <PeoplePanel users={bootstrap.users} meId={me.id} online={new Set([...online, ...(socketConnected ? [me.id] : [])])} onOpenDm={userId => { setRightPanel(null); void openDm(userId); }} onClose={() => setRightPanel(null)}/>}
 
@@ -843,9 +845,9 @@ export function ChatApp() {
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-1.5 text-[13px] text-zinc-600">
                   <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-amber-400 text-amber-950"><AtSign size={10} strokeWidth={3}/></span>
-                  <span className="truncate"><b className="font-semibold text-zinc-900">{mentionToast.message.author.displayName}</b> mentioned you in {mentionToast.where}</span>
+                  <span className="truncate"><b className="font-semibold text-zinc-900">{mentionToast.message.author.displayName}</b> {mentionToast.kind === "direct" ? "mentioned you" : `notified @${mentionToast.kind}`} in {mentionToast.where}</span>
                 </span>
-                <span className="mt-1 line-clamp-2 block text-[13px] leading-5 text-zinc-800">{mentionToast.message.body}</span>
+                <span className="mt-1 line-clamp-2 block text-[13px] leading-5 text-zinc-800">{mentionsToText(mentionToast.message.body, id => usersById.get(id)?.displayName)}</span>
                 <span className="mt-1.5 block text-[11px] font-medium text-amber-700">View message</span>
               </span>
             </button>

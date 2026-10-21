@@ -13,11 +13,6 @@ export function dayLabel(value: string) {
   return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "short", day: "numeric" }).format(date);
 }
 
-// The single definition of "this message mentions that person", matching the server's Activity query.
-export function mentionsUser(body: string, displayName: string) {
-  return body.toLowerCase().includes(`@${displayName.toLowerCase()}`);
-}
-
 export function isOptimistic(message: ChatMessage) {
   return message.id.startsWith("optimistic-");
 }

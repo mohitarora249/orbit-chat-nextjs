@@ -4,6 +4,7 @@ import { visibleConversationsWhere } from "@/lib/access";
 import { requireUser } from "@/lib/session";
 import { getPrimaryWorkspaceLink } from "@/lib/workspace";
 import { jsonError, routeError } from "@/lib/http";
+import { broadcastToken, userToken } from "@/lib/mentions";
 import type { ActivityItem } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +25,8 @@ export async function GET(request: NextRequest) {
 
     const [mentions, replies, reactions] = await Promise.all([
       prisma.message.findMany({
-        where: { conversation: visible, deletedAt: null, authorId: { not: user.id }, body: { contains: `@${user.displayName}`, mode: "insensitive" } },
+        // Direct mentions and @channel. @here only alerts people who are online when it is sent.
+        where: { conversation: visible, deletedAt: null, authorId: { not: user.id }, OR: [{ body: { contains: userToken(user.id) } }, { body: { contains: broadcastToken("channel") } }] },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: LIMIT,
         select: { id: true, body: true, parentId: true, conversationId: true, createdAt: true, author: authorSelect }

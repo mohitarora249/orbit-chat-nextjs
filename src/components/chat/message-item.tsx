@@ -1,10 +1,11 @@
 "use client";
 
-import { Fragment, KeyboardEvent, memo, useMemo, useState } from "react";
+import { Fragment, KeyboardEvent, memo, useState } from "react";
 import { AlertTriangle, Download, FileText, Loader2, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
-import { dayLabel, isOptimistic, mentionsUser, timeLabel } from "@/components/chat/helpers";
+import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
+import { encodeMentions, mentionsMe, mentionsToText, mentionTargets, parseMentions } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ChatAttachment, ChatMessage, ChatUser } from "@/lib/types";
 
@@ -26,22 +27,16 @@ type Props = MessageActions & {
   highlighted?: boolean;
 };
 
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Renders text with @Display Name mentions highlighted. Plain React text nodes only, never HTML.
-function MessageBody({ body, users, meName }: { body: string; users: ChatUser[]; meName: string }) {
-  const pattern = useMemo(() => {
-    const names = users.map(user => user.displayName).sort((a, b) => b.length - a.length).map(escapeRegExp);
-    return names.length ? new RegExp(`(@(?:${names.join("|")}))`, "gi") : null;
-  }, [users]);
-  if (!pattern) return <>{body}</>;
+// Renders text with mention tokens shown as the person's current name. Plain React text nodes only, never HTML.
+function MessageBody({ body, usersById, meId }: { body: string; usersById: Map<string, ChatUser>; meId: string }) {
   return (
     <>
-      {body.split(pattern).map((part, index) => index % 2 === 1
-        ? <span key={index} className={cn("rounded px-0.5 font-semibold", part.slice(1).toLowerCase() === meName.toLowerCase() ? "bg-amber-200/80 text-amber-950" : "bg-brand-50 text-brand-700")}>{part}</span>
-        : <Fragment key={index}>{part}</Fragment>)}
+      {parseMentions(body).map((part, index) => {
+        if (typeof part === "string") return <Fragment key={index}>{part}</Fragment>;
+        const forMe = part.kind !== "user" || part.userId === meId;
+        const label = part.kind === "user" ? usersById.get(part.userId)?.displayName ?? "unknown user" : part.kind;
+        return <span key={index} className={cn("rounded px-0.5 font-semibold", forMe ? "bg-amber-200/80 text-amber-950" : "bg-brand-50 text-brand-700")}>@{label}</span>;
+      })}
     </>
   );
 }
@@ -84,14 +79,20 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
   const [editDraft, setEditDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [picker, setPicker] = useState(false);
-  const users = useMemo(() => [...usersById.values()], [usersById]);
   const pending = isOptimistic(message);
   const deleted = Boolean(message.deletedAt);
   const mine = message.authorId === me.id;
-  const mentionsMe = !mine && !deleted && mentionsUser(message.body, me.displayName);
+  const mentioned = !mine && !deleted && mentionsMe(message.body, me.id) !== null;
+
+  // The edit box shows names; people already mentioned in the message win over others with the same name.
+  function startEdit() {
+    setEditDraft(mentionsToText(message.body, id => usersById.get(id)?.displayName, null));
+    setEditing(true);
+  }
 
   async function saveEdit() {
-    const body = editDraft.trim();
+    const alreadyMentioned = parseMentions(message.body).flatMap(part => typeof part !== "string" && part.kind === "user" && usersById.has(part.userId) ? [usersById.get(part.userId)!] : []);
+    const body = encodeMentions(editDraft.trim(), mentionTargets([...alreadyMentioned, ...usersById.values()], true));
     if (body === message.body) { setEditing(false); return; }
     setSaving(true);
     try {
@@ -111,7 +112,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
 
   return (
     <div id={`message-${message.id}`} className={cn("group relative flex gap-3 rounded-lg px-2 py-1 transition-colors duration-150", grouped ? "" : "mt-4",
-      highlighted ? "bg-brand-50 ring-1 ring-brand-200" : mentionsMe ? "rounded-l-none bg-amber-50/80 shadow-[inset_3px_0_0_theme(colors.amber.400)] hover:bg-amber-50" : "hover:bg-zinc-50/80")}>
+      highlighted ? "bg-brand-50 ring-1 ring-brand-200" : mentioned ? "rounded-l-none bg-amber-50/80 shadow-[inset_3px_0_0_theme(colors.amber.400)] hover:bg-amber-50" : "hover:bg-zinc-50/80")}>
       <div className="w-9 shrink-0">
         {grouped
           ? <span className="block pt-[3px] text-right text-[10px] tabular-nums leading-5 text-zinc-400 opacity-0 transition group-hover:opacity-100">{timeLabel(message.createdAt)}</span>
@@ -138,7 +139,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
         ) : (
           message.body && (
             <p className={cn("whitespace-pre-wrap break-words text-sm leading-6 transition-colors", pending ? "text-zinc-400" : "text-zinc-800")}>
-              <MessageBody body={message.body} users={users} meName={me.displayName}/>
+              <MessageBody body={message.body} usersById={usersById} meId={me.id}/>
               {message.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(message.editedAt)} at ${timeLabel(message.editedAt)}`}>(edited)</span>}
             </p>
           )
@@ -170,7 +171,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
         <div className={cn("absolute -top-4 right-2 z-10 items-center gap-0.5 rounded-lg border border-zinc-200/80 bg-white p-0.5 shadow-float", picker ? "flex" : "hidden group-hover:flex group-focus-within:flex")}>
           <button title="Add reaction" aria-label="Add reaction" onClick={() => setPicker(true)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><SmilePlus size={15}/></button>
           {onOpenThread && <button title="Reply in thread" aria-label="Reply in thread" onClick={() => onOpenThread(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><MessageSquareText size={15}/></button>}
-          {mine && <button title="Edit message" aria-label="Edit message" onClick={() => { setEditDraft(message.body); setEditing(true); }} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
+          {mine && <button title="Edit message" aria-label="Edit message" onClick={startEdit} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
           {(mine || canModerate) && <button title="Delete message" aria-label="Delete message" onClick={() => onDelete(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14}/></button>}
           {picker && (
             <EmojiPicker className="right-0 top-8" onClose={() => setPicker(false)} onPick={emoji => {

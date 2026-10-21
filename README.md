@@ -17,6 +17,7 @@ A web-only team chat starter using **Next.js App Router, Next.js Route Handlers,
 - **Attachments:** browsers upload straight to private S3-compatible storage with presigned URLs. Every file is scanned by ClamAV before anyone can download it, and downloads are re-authorized and redirected to a 60-second presigned URL.
 - **Presence and typing:** online dots and "X is typing…", which work across instances through the Redis adapter.
 - **Activity, Help, workspace menu, ⌘K and notifications:** Activity lists your mentions, thread replies and reactions; Help shows the shortcuts; the workspace menu has create channel, copy invite link and sign out; ⌘K jumps to a conversation or searches; notifications give desktop alerts for DMs and @mentions, plus per-conversation mute.
+- **Mentions:** typing `@` suggests people (and `@channel` / `@here` in channels). Mentions are stored as `<@userId>` tokens and shown with the person's current name, so they survive a rename. `@channel` notifies everyone who can see the channel; `@here` notifies those online when it is sent.
 - **Reliable delivery:** every change writes an `OutboxEvent` in the same transaction; a worker publishes it with retries, backoff and dead-lettering.
 
 ## Requirements
@@ -140,7 +141,7 @@ server.ts  docker-compose.yml  docker/seaweedfs-s3.json
 3. **Presence** is online/offline only (no idle or away), based on connected sockets.
 4. **Notification preferences** (desktop and mute) are stored per browser, not on the server.
 5. **Search** has no `in:#channel` / `from:@person` filters, and no prefix matching on partial words.
-6. **Mentions** are plain `@Display Name` text matches; there is no autocomplete and they don't survive a name change.
+6. **Mentions:** `@here` alerts only people who receive it live; it is not counted in unread mention badges or Activity afterwards. Searching for a person's name does not find messages that mention them.
 7. **Tests:** there is no automated test suite in the repo yet.
 
 ## Why a custom server?

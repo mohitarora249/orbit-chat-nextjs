@@ -7,6 +7,7 @@ import { Composer } from "@/components/chat/composer";
 import { MessageItem, type MessageActions } from "@/components/chat/message-item";
 import { dayLabel, isGrouped, timeLabel } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
+import { mentionsToText } from "@/lib/mentions";
 import type { ActivityItem, ChatAttachment, ChatMessage, ChatUser } from "@/lib/types";
 
 function PanelShell({ title, subtitle, onClose, children }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode }) {
@@ -32,6 +33,7 @@ type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   typingText: string | null;
   highlightId: string | null;
   mentionable: ChatUser[];
+  broadcastMentions: boolean;
   onClose: () => void;
   onLoadMore: () => void;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
@@ -39,7 +41,7 @@ type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   onNotice: (message: string) => void;
 };
 
-export function ThreadPanel({ thread, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, onClose, onLoadMore, onSend, onTyping, onNotice, ...actions }: ThreadPanelProps) {
+export function ThreadPanel({ thread, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, broadcastMentions, onClose, onLoadMore, onSend, onTyping, onNotice, ...actions }: ThreadPanelProps) {
   const { parent, replies } = thread;
   return (
     <PanelShell title="Thread" subtitle={conversationName} onClose={onClose}>
@@ -65,7 +67,7 @@ export function ThreadPanel({ thread, conversationName, me, canModerate, usersBy
       </div>
       {parent && !parent.deletedAt && (
         <div className="px-4 pb-4">
-          <Composer key={thread.parentId} conversationId={parent.conversationId} parentId={parent.id} placeholder="Reply…" typingText={typingText} compact autoFocus mentionable={mentionable} onSend={onSend} onTyping={onTyping} onNotice={onNotice}/>
+          <Composer key={thread.parentId} conversationId={parent.conversationId} parentId={parent.id} placeholder="Reply…" typingText={typingText} compact autoFocus mentionable={mentionable} broadcastMentions={broadcastMentions} onSend={onSend} onTyping={onTyping} onNotice={onNotice}/>
         </div>
       )}
     </PanelShell>
@@ -78,7 +80,7 @@ const activityIcons = {
   reaction: <SmilePlus size={12}/>
 };
 
-export function ActivityPanel({ conversationName, onOpen, onClose }: { conversationName: (id: string) => string; onOpen: (item: ActivityItem) => void; onClose: () => void }) {
+export function ActivityPanel({ usersById, conversationName, onOpen, onClose }: { usersById: Map<string, ChatUser>; conversationName: (id: string) => string; onOpen: (item: ActivityItem) => void; onClose: () => void }) {
   const [items, setItems] = useState<ActivityItem[] | null>(null);
   const [error, setError] = useState("");
 
@@ -100,7 +102,7 @@ export function ActivityPanel({ conversationName, onOpen, onClose }: { conversat
                 <span className="text-zinc-400">{activityIcons[item.kind]}</span>
                 <span className="truncate"><b className="font-medium text-zinc-900">{item.actor.displayName}</b> {item.kind === "mention" ? "mentioned you" : item.kind === "reply" ? "replied in a thread" : <>reacted {item.emoji}</>}</span>
               </div>
-              <p className="mt-1 line-clamp-2 text-[13px] leading-5 text-zinc-700">{item.message.body || "(attachment)"}</p>
+              <p className="mt-1 line-clamp-2 text-[13px] leading-5 text-zinc-700">{mentionsToText(item.message.body, id => usersById.get(id)?.displayName) || "(attachment)"}</p>
               <p className="mt-1 flex items-center gap-1 text-[11px] text-zinc-400"><Hash size={10}/>{conversationName(item.conversationId)} · {dayLabel(item.at)} at {timeLabel(item.at)}</p>
             </div>
           </button>

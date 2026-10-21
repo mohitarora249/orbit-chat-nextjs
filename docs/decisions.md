@@ -28,3 +28,8 @@
 ## ADR-006: Private object storage with scan-before-download
 **Decision:** Browsers upload to S3-compatible storage through presigned PUT URLs (SeaweedFS locally). Files are scanned by ClamAV through the outbox before they can be downloaded, and each download is re-authorized and redirected to a 60-second presigned GET.  
 **Reason:** The app servers never proxy large files, and an infected file is never served.
+
+## ADR-007: Mentions are stored as id tokens
+**Decision:** Message bodies store `<@userId>`, `<!channel>` and `<!here>` tokens (Slack-style). The composer shows names and encodes them on send; every renderer resolves tokens to the current display name. A migration converted existing `@Display Name` text.  
+**Reason:** Name matching broke on renames and was ambiguous between similar names; id tokens make unread mention counts and Activity exact string matches.  
+**Note:** Whether someone was online for an `@here` is not stored, so it alerts live only.

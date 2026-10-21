@@ -1,11 +1,12 @@
 "use client";
 
-import { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { ArrowUp, AtSign, Loader2, Paperclip, Smile, X } from "lucide-react";
+import { ClipboardEvent, DragEvent, Fragment, FormEvent, KeyboardEvent, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ArrowUp, AtSign, Loader2, Megaphone, Paperclip, Smile, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { api } from "@/lib/api";
+import { encodeMentions, mentionTargets, type BroadcastMention } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ChatAttachment, ChatUser } from "@/lib/types";
 
@@ -24,11 +25,18 @@ function findMentionQuery(text: string, caret: number): MentionQuery | null {
   return match ? { start: caret - match[1].length - 1, query: match[1] } : null;
 }
 
-function matchesMention(user: ChatUser, query: string) {
-  const name = user.displayName.toLowerCase();
+function matchesMention(name: string, query: string) {
+  const lower = name.toLowerCase();
   const q = query.toLowerCase();
-  return name.startsWith(q) || name.split(/\s+/).some(word => word.startsWith(q));
+  return lower.startsWith(q) || lower.split(/\s+/).some(word => word.startsWith(q));
 }
+
+const BROADCASTS: { kind: BroadcastMention; hint: string }[] = [
+  { kind: "channel", hint: "Notify everyone in this channel" },
+  { kind: "here", hint: "Notify everyone online right now" }
+];
+
+type Suggestion = { kind: "user"; user: ChatUser } | { kind: BroadcastMention; hint: string };
 
 type Upload = { localId: string; fileName: string; size: number; state: "uploading" | "ready" | "error"; attachment?: ChatAttachment; error?: string };
 
@@ -40,6 +48,8 @@ type Props = {
   compact?: boolean;
   // People who can be @mentioned here, in suggestion order.
   mentionable: ChatUser[];
+  // Offer @channel and @here (channels only, not DMs).
+  broadcastMentions?: boolean;
   autoFocus?: boolean;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
   onTyping: (typing: boolean) => void;
@@ -59,13 +69,16 @@ async function uploadFile(conversationId: string, file: File) {
   return done.attachment;
 }
 
-export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, onSend, onTyping, onNotice }: Props) {
+export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, broadcastMentions, onSend, onTyping, onNotice }: Props) {
   const [draft, setDraft] = useState("");
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [sending, setSending] = useState(false);
   const [picker, setPicker] = useState(false);
   const [mention, setMention] = useState<MentionQuery | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  // People chosen from the suggestions. The draft shows their names; on send, those names become <@id>
+  // tokens, and a chosen person wins over someone else with the same name.
+  const [picked, setPicked] = useState<ChatUser[]>([]);
   const [dragging, setDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -134,22 +147,29 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     event?.preventDefault();
     // While suggestions are open, Enter picks a person; it must never send.
     if (!canSend || suggesting) return;
-    const body = draft.trim();
+    const text = draft.trim();
+    const body = encodeMentions(text, mentionTargets([...picked, ...mentionable], Boolean(broadcastMentions)));
     const sentUploads = uploads;
+    const sentPicked = picked;
     setSending(true);
     setDraft("");
     setUploads([]);
+    setPicked([]);
     setTyping(false);
     const ok = await onSend(body, ready);
     if (!ok) {
-      setDraft(body);
+      setDraft(text);
       setUploads(sentUploads);
+      setPicked(sentPicked);
     }
     setSending(false);
     textareaRef.current?.focus();
   }
 
-  const suggestions = mention ? mentionable.filter(user => matchesMention(user, mention.query)).slice(0, MAX_MENTION_SUGGESTIONS) : [];
+  const suggestions: Suggestion[] = mention ? [
+    ...mentionable.filter(user => matchesMention(user.displayName, mention.query)).slice(0, MAX_MENTION_SUGGESTIONS).map(user => ({ kind: "user" as const, user })),
+    ...(broadcastMentions ? BROADCASTS.filter(item => matchesMention(item.kind, mention.query)) : [])
+  ] : [];
   const suggesting = suggestions.length > 0;
   const activeMention = Math.min(mentionIndex, suggestions.length - 1);
 
@@ -159,10 +179,12 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     if (next?.start !== mention?.start || next?.query !== mention?.query) setMentionIndex(0);
   }
 
-  function pickMention(user: ChatUser) {
+  function pickMention(suggestion: Suggestion) {
     if (!mention) return;
     const end = mention.start + 1 + mention.query.length;
-    const inserted = `@${user.displayName}${/^\s/.test(draft.slice(end)) ? "" : " "}`;
+    const label = suggestion.kind === "user" ? suggestion.user.displayName : suggestion.kind;
+    if (suggestion.kind === "user") setPicked(current => [suggestion.user, ...current.filter(user => user.id !== suggestion.user.id)]);
+    const inserted = `@${label}${/^\s/.test(draft.slice(end)) ? "" : " "}`;
     setDraft(draft.slice(0, mention.start) + inserted + draft.slice(end));
     setMention(null);
     const caret = mention.start + inserted.length;
@@ -226,16 +248,30 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
       <form onSubmit={submit} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}
         className={cn("relative rounded-xl border bg-white shadow-float transition duration-150 focus-within:border-zinc-300 focus-within:shadow-soft", dragging ? "border-brand-400 ring-4 ring-brand-100" : "border-zinc-200")}>
         {suggesting && (
-          <ul id={`${listId}-mentions`} role="listbox" aria-label="People to mention" className="absolute bottom-full left-0 z-40 mb-2 w-72 max-w-full animate-pop-in overflow-hidden rounded-xl border border-zinc-200/80 bg-white p-1 shadow-soft">
-            <li role="presentation" className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-400">People</li>
-            {suggestions.map((user, index) => (
-              <li key={user.id} id={`${listId}-mention-${index}`} role="option" aria-selected={index === activeMention}
-                // mousedown, not click: keep focus in the textarea so the caret position is not lost.
-                onMouseDown={event => { event.preventDefault(); pickMention(user); }} onMouseEnter={() => setMentionIndex(index)}
-                className={cn("flex h-9 cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[13px]", index === activeMention ? "bg-zinc-100 text-zinc-900" : "text-zinc-700")}>
-                <Avatar name={user.displayName} color={user.avatarColor} size="sm"/>
-                <span className="truncate font-medium">{user.displayName}</span>
-              </li>
+          <ul id={`${listId}-mentions`} role="listbox" aria-label="Mention suggestions" className="absolute bottom-full left-0 z-40 mb-2 w-72 max-w-full animate-pop-in overflow-hidden rounded-xl border border-zinc-200/80 bg-white p-1 shadow-soft">
+            {suggestions.map((suggestion, index) => (
+              <Fragment key={suggestion.kind === "user" ? suggestion.user.id : suggestion.kind}>
+                {(index === 0 || (suggestion.kind === "user") !== (suggestions[index - 1].kind === "user")) && (
+                  <li role="presentation" className={cn("px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-400", index > 0 && "mt-1 border-t border-zinc-100")}>{suggestion.kind === "user" ? "People" : "Notify"}</li>
+                )}
+                <li id={`${listId}-mention-${index}`} role="option" aria-selected={index === activeMention}
+                  // mousedown, not click: keep focus in the textarea so the caret position is not lost.
+                  onMouseDown={event => { event.preventDefault(); pickMention(suggestion); }} onMouseEnter={() => setMentionIndex(index)}
+                  className={cn("flex h-9 cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[13px]", index === activeMention ? "bg-zinc-100 text-zinc-900" : "text-zinc-700")}>
+                  {suggestion.kind === "user" ? (
+                    <>
+                      <Avatar name={suggestion.user.displayName} color={suggestion.user.avatarColor} size="sm"/>
+                      <span className="truncate font-medium">{suggestion.user.displayName}</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-100 text-amber-700"><Megaphone size={13}/></span>
+                      <span className="font-medium">@{suggestion.kind}</span>
+                      <span className="truncate text-[11px] text-zinc-400">{suggestion.hint}</span>
+                    </>
+                  )}
+                </li>
+              </Fragment>
             ))}
             <li role="presentation" className="mt-1 border-t border-zinc-100 px-2.5 pb-1 pt-1.5 text-[11px] text-zinc-400">↑↓ choose · Enter insert · Esc dismiss</li>
           </ul>

@@ -7,14 +7,15 @@ import { Button } from "@/components/ui/button";
 import { Dialog, Popover } from "@/components/ui/overlay";
 import { dayLabel, timeLabel } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
+import { mentionsToText } from "@/lib/mentions";
 import { cn, HIGHLIGHT_END, HIGHLIGHT_START } from "@/lib/utils";
 import type { ChatUser, ConversationSummary, SearchHit } from "@/lib/types";
 
 type JumpItem = { key: string; label: string; icon: React.ReactNode; run: () => void };
 
-function Snippet({ text }: { text: string }) {
+function Snippet({ text, nameOf }: { text: string; nameOf: (userId: string) => string | undefined }) {
   // ts_headline wraps matches in marker characters; render them as <mark> using text nodes only.
-  const parts = text.split(new RegExp(`(${HIGHLIGHT_START}[^${HIGHLIGHT_END}]*${HIGHLIGHT_END})`));
+  const parts = mentionsToText(text, nameOf).split(new RegExp(`(${HIGHLIGHT_START}[^${HIGHLIGHT_END}]*${HIGHLIGHT_END})`));
   return (
     <>
       {parts.map((part, index) => part.startsWith(HIGHLIGHT_START)
@@ -128,7 +129,7 @@ export function CommandPalette({ conversations, users, me, label, onOpenConversa
                       <span className="truncate">{hit.conversation.type === "CHANNEL" ? "#" : ""}{hitLabel(hit)}{hit.message.parentId ? " · in a thread" : ""}</span>
                       <span className="ml-auto shrink-0 text-[10px] text-zinc-400">{dayLabel(hit.message.createdAt)} {timeLabel(hit.message.createdAt)}</span>
                     </div>
-                    <p className="mt-0.5 line-clamp-2 text-xs text-zinc-700"><Snippet text={hit.snippet}/></p>
+                    <p className="mt-0.5 line-clamp-2 text-xs text-zinc-700"><Snippet text={hit.snippet} nameOf={id => users.find(user => user.id === id)?.displayName}/></p>
                   </div>
                 </button>
               );

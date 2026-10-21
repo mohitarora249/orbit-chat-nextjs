@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { visibleConversationsWhere } from "./access";
+import { broadcastToken, userToken } from "./mentions";
 import type { ConversationSummary } from "./types";
 
 export const conversationSelect = {
@@ -40,8 +41,8 @@ export function serializeConversation(conversation: SelectedConversation, read?:
 
 // Unread = top-level messages from other people after the user's read cursor. Conversations the user has
 // never opened count everything, capped so a long-lived channel does not make this query expensive.
-// Mentions = unread top-level messages whose text contains "@<their display name>", the same rule the
-// Activity feed and the client use. Thread replies are left out: the read cursor only advances to top-level
+// Mentions = unread top-level messages containing the user's <@id> token or <!channel>, the same rule as the
+// Activity feed (see src/lib/mentions.ts; @here only alerts live). Thread replies are left out: the read cursor only advances to top-level
 // messages, so a reply mention could never be cleared. They still reach the user live and via Activity.
 const UNREAD_CAP = 100;
 
@@ -57,11 +58,11 @@ async function readState(userId: string, conversationIds: string[]) {
         LIMIT ${UNREAD_CAP}
       ) unread_rows) AS unread,
       (SELECT count(*)::int FROM (
-        SELECT 1 FROM "Message" m, "User" u
-        WHERE u.id = ${userId} AND m."conversationId" = c.id AND m."parentId" IS NULL AND m."deletedAt" IS NULL
+        SELECT 1 FROM "Message" m
+        WHERE m."conversationId" = c.id AND m."parentId" IS NULL AND m."deletedAt" IS NULL
           AND m."authorId" <> ${userId}
           AND (rc."lastReadAt" IS NULL OR m."createdAt" > rc."lastReadAt")
-          AND strpos(lower(m.body), lower('@' || u."displayName")) > 0
+          AND (strpos(m.body, ${userToken(userId)}) > 0 OR strpos(m.body, ${broadcastToken("channel")}) > 0)
         LIMIT ${UNREAD_CAP}
       ) mention_rows) AS mentions
     FROM "Conversation" c
