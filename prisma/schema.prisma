@@ -1,0 +1,235 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum ConversationType {
+  CHANNEL
+  DM
+}
+
+enum AttachmentStatus {
+  PENDING_UPLOAD
+  SCANNING
+  CLEAN
+  INFECTED
+  FAILED
+}
+
+// `name` in Better Auth is mapped to `displayName` (see src/lib/auth.ts).
+model User {
+  id             String               @id @default(cuid())
+  displayName    String
+  email          String               @unique
+  emailVerified  Boolean              @default(false)
+  image          String?
+  avatarColor    String               @default("#6D5EF6")
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @default(now()) @updatedAt
+  workspaceLinks WorkspaceMember[]
+  memberships    ConversationMember[]
+  messages       Message[]
+  reactions      Reaction[]
+  readCursors    ReadCursor[]
+  sessions       Session[]
+  accounts       Account[]
+  attachments    Attachment[]
+}
+
+// Better Auth tables.
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  userId    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+model Workspace {
+  id            String            @id @default(cuid())
+  name          String
+  slug          String            @unique
+  createdAt     DateTime          @default(now())
+  members       WorkspaceMember[]
+  conversations Conversation[]
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(MEMBER)
+  joinedAt    DateTime      @default(now())
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId, workspaceId])
+}
+
+// Channel names are stored normalized (lowercase). A DM's name is its sorted member ids joined by ":",
+// so the unique constraint also guarantees one DM per pair of people.
+model Conversation {
+  id          String               @id @default(cuid())
+  workspaceId String
+  name        String
+  type        ConversationType     @default(CHANNEL)
+  isPrivate   Boolean              @default(false)
+  topic       String?
+  createdById String?
+  createdAt   DateTime             @default(now())
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  members     ConversationMember[]
+  messages    Message[]
+  readCursors ReadCursor[]
+  attachments Attachment[]
+
+  @@unique([workspaceId, type, name])
+}
+
+model ConversationMember {
+  id             String       @id @default(cuid())
+  conversationId String
+  userId         String
+  joinedAt       DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId, conversationId])
+}
+
+model Message {
+  id              String                   @id @default(cuid())
+  conversationId  String
+  authorId        String
+  clientMessageId String
+  body            String
+  // Thread replies point at their top-level parent; threads are one level deep.
+  parentId        String?
+  replyCount      Int                      @default(0)
+  lastReplyAt     DateTime?
+  createdAt       DateTime                 @default(now())
+  editedAt        DateTime?
+  deletedAt       DateTime?
+  // Generated column (see the add_features migration): to_tsvector('english', body).
+  searchVector    Unsupported("tsvector")? @default(dbgenerated("to_tsvector('english'::regconfig, body)"))
+  conversation    Conversation             @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  author          User                     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent          Message?                 @relation("Thread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies         Message[]                @relation("Thread")
+  reactions       Reaction[]
+  attachments     Attachment[]
+
+  @@unique([authorId, clientMessageId])
+  @@index([conversationId, createdAt, id])
+  @@index([parentId, createdAt, id])
+  @@index([authorId, createdAt])
+  @@index([searchVector], type: Gin)
+}
+
+model Reaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
+
+model ReadCursor {
+  id             String       @id @default(cuid())
+  conversationId String
+  userId         String
+  lastReadAt     DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+}
+
+// Uploaded straight to private object storage with a presigned URL, then scanned before anyone can download it.
+model Attachment {
+  id             String           @id @default(cuid())
+  conversationId String
+  uploaderId     String
+  messageId      String?
+  storageKey     String           @unique
+  fileName       String
+  contentType    String
+  size           Int
+  status         AttachmentStatus @default(PENDING_UPLOAD)
+  createdAt      DateTime         @default(now())
+  scannedAt      DateTime?
+  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  uploader       User             @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  message        Message?         @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([messageId])
+  @@index([uploaderId, status])
+}
+
+// Transactional outbox: written in the same transaction as the change it describes, then delivered by
+// src/lib/outbox-worker.ts with retries. `availableAt` doubles as the lease while a worker holds the event.
+model OutboxEvent {
+  id          BigInt    @id @default(autoincrement())
+  type        String
+  payload     Json
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  failedAt    DateTime?
+  lastError   String?
+
+  @@index([failedAt, availableAt, id])
+}

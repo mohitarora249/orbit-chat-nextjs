@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "orbit-chat",
+      "credentials": [{ "accessKey": "orbit-dev", "secretKey": "orbit-dev-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
