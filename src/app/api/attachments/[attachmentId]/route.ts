@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getConversationAccess } from "@/lib/access";
+import { getConversationAccess, visibleConversationsWhere } from "@/lib/access";
 import { requireUser } from "@/lib/session";
 import { presignDownload } from "@/lib/storage";
 import { jsonError, routeError } from "@/lib/http";
@@ -21,9 +21,13 @@ export async function GET(request: NextRequest, context: Context) {
       include: { message: { select: { deletedAt: true } } }
     });
     if (!attachment) return jsonError("Attachment not found.", 404);
-    // Before it is sent, only the uploader may see it; afterwards anyone who can see the conversation.
+    // Before it is sent, only the uploader may see it; afterwards anyone who can see the conversation, or a
+    // live forward of the message.
     const visible = attachment.message
-      ? !attachment.message.deletedAt && (await getConversationAccess(user.id, attachment.conversationId)) === "ok"
+      ? !attachment.message.deletedAt && (
+        (await getConversationAccess(user.id, attachment.conversationId)) === "ok"
+        || (await prisma.message.count({ where: { forwardedFromId: attachment.messageId, deletedAt: null, conversation: visibleConversationsWhere(user.id) }, take: 1 })) > 0
+      )
       : attachment.uploaderId === user.id;
     if (!visible) return jsonError("Attachment not found.", 404);
     if (attachment.status !== "CLEAN") {

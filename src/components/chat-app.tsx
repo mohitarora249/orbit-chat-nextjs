@@ -11,16 +11,16 @@ import { Button } from "@/components/ui/button";
 import { Composer } from "@/components/chat/composer";
 import { MessageItem } from "@/components/chat/message-item";
 import { ActivityPanel, PeoplePanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
-import { CommandPalette, CreateChannelDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type NotificationPrefs } from "@/components/chat/dialogs";
+import { CommandPalette, CreateChannelDialog, ForwardDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type ForwardTarget, type NotificationPrefs } from "@/components/chat/dialogs";
 import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
 import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, mergeMessages, upsertMessage } from "@/components/chat/helpers";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
-import { mentionsMe, mentionsToText } from "@/lib/mentions";
+import { encodeMentions, mentionsMe, mentionsToText, mentionTargets } from "@/lib/mentions";
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
-import type { ActivityItem, Bootstrap, ChatAttachment, ChatMessage, ChatUser, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
+import type { ActivityItem, Bootstrap, ChatAttachment, ChatForward, ChatMessage, ChatUser, ConversationSummary, MessagePage, SearchHit } from "@/lib/types";
 
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
@@ -74,6 +74,7 @@ export function ChatApp() {
   const [prefs, setPrefs] = useState<NotificationPrefs>({ desktop: false, sound: true, muted: [] });
   const [visibleTick, setVisibleTick] = useState(0);
   const [mentionToast, setMentionToast] = useState<MentionToast | null>(null);
+  const [forwarding, setForwarding] = useState<ChatMessage | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -90,6 +91,7 @@ export function ChatApp() {
   const idleRef = useRef(false);
   const lastMarkedRef = useRef("");
   const jumpPagesRef = useRef(0);
+  const jumpToRef = useRef<(conversationId: string, messageId: string, parentId: string | null) => void>(() => {});
   bootstrapRef.current = bootstrap;
   prefsRef.current = prefs;
   idleRef.current = idle;
@@ -299,7 +301,7 @@ export function ChatApp() {
     if (!mentionsMe(message.body, state.me.id) && conversation?.type !== "DM") return;
     const where = conversation?.type === "DM" ? "" : ` in #${conversation?.name ?? "a channel"}`;
     const body = mentionsToText(message.body, id => state.users.find(user => user.id === id)?.displayName);
-    const notification = new Notification(`${message.author.displayName}${where}`, { body: body || "Sent an attachment", tag: message.id });
+    const notification = new Notification(`${message.author.displayName}${where}`, { body: body || (message.forwarded ? "Forwarded a message" : "Sent an attachment"), tag: message.id });
     notification.onclick = () => {
       window.focus();
       setActiveId(message.conversationId);
@@ -489,7 +491,7 @@ export function ChatApp() {
     const optimistic: ChatMessage = {
       id: `optimistic-${clientMessageId}`, conversationId, authorId: state.me.id, clientMessageId, body, parentId,
       replyCount: 0, lastReplyAt: null, createdAt: new Date().toISOString(), editedAt: null, deletedAt: null,
-      author: { id: state.me.id, displayName: state.me.displayName, avatarColor: state.me.avatarColor }, reactions: [], attachments, linkPreviews: []
+      author: { id: state.me.id, displayName: state.me.displayName, avatarColor: state.me.avatarColor }, reactions: [], attachments, linkPreviews: [], forwarded: null
     };
     const place = (message: ChatMessage) => {
       if (parentId) setThread(current => current?.parentId === parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
@@ -617,6 +619,46 @@ export function ChatApp() {
     }
   }, [addConversation, openConversation]);
 
+  // Sends one forward per target, creating DMs that do not exist yet. Returns true if every one was sent.
+  async function forwardMessage(message: ChatMessage, targets: ForwardTarget[], comment: string) {
+    const state = bootstrapRef.current;
+    if (!state) return false;
+    const body = encodeMentions(comment, mentionTargets(state.users, false));
+    const results = await Promise.allSettled(targets.map(async target => {
+      let conversationId: string;
+      if (target.kind === "conversation") conversationId = target.id;
+      else {
+        const { conversation } = await api<{ conversation: ConversationSummary }>("/api/conversations/dm", { method: "POST", json: { userId: target.userId } });
+        addConversation(conversation);
+        conversationId = conversation.id;
+      }
+      const { message: sent } = await api<{ message: ChatMessage }>(`/api/conversations/${conversationId}/messages`, {
+        method: "POST",
+        json: { body, clientMessageId: crypto.randomUUID(), forwardedMessageId: message.id }
+      });
+      if (activeIdRef.current === conversationId) setHistory(current => ({ ...current, messages: upsertMessage(current.messages, sent) }));
+      return conversationId;
+    }));
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    const sent = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+    if (failed) {
+      const reason = failed.reason instanceof Error ? failed.reason.message : "Message could not be forwarded.";
+      setNotice(sent.length ? `Forwarded to ${sent.length} of ${targets.length}. ${reason}` : reason);
+      return false;
+    }
+    const only = sent.length === 1 ? bootstrapRef.current?.conversations.find(c => c.id === sent[0]) : undefined;
+    setNotice(only ? `Forwarded to ${only.type === "CHANNEL" ? "#" : ""}${label(only)}.` : `Forwarded to ${sent.length} conversations.`);
+    return true;
+  }
+
+  const onForward = useCallback((message: ChatMessage) => setForwarding(message), []);
+  // Only originals in conversations the viewer can see can be opened; anyone else just sees the card.
+  // Reads the ref so it stays stable (the conversation list changes with every message) and MessageItem stays memoized.
+  const openForwarded = useCallback((forward: ChatForward) => {
+    if (!bootstrapRef.current?.conversations.some(c => c.id === forward.conversationId)) return null;
+    return () => jumpToRef.current(forward.conversationId, forward.messageId, forward.parentId);
+  }, []);
+
   function jumpTo(conversationId: string, messageId: string, parentId: string | null) {
     openConversation(conversationId);
     setRightPanel(null);
@@ -624,6 +666,7 @@ export function ChatApp() {
     setHighlightId(messageId);
     jumpPagesRef.current = 0;
   }
+  jumpToRef.current = jumpTo;
   const openHit = (hit: SearchHit) => jumpTo(hit.conversation.id, hit.message.id, hit.message.parentId);
   const openActivity = (item: ActivityItem) => jumpTo(item.conversationId, item.message.id, item.message.parentId);
 
@@ -936,7 +979,8 @@ export function ChatApp() {
                   )}
                   {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
                   <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
-                    highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}/>
+                    highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
+                    onForward={onForward} openForwarded={openForwarded}/>
                 </Fragment>
               );
             })}
@@ -962,7 +1006,7 @@ export function ChatApp() {
           typingText={typingText(thread.parent?.conversationId ?? activeId ?? "", thread.parentId)} highlightId={highlightId} mentionable={mentionable}
           broadcastMentions={activeConversation?.type === "CHANNEL"} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
           onSend={(body, attachments) => sendMessage(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, body, attachments)}
-          onTyping={onThreadTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete}/>
+          onTyping={onThreadTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} openForwarded={openForwarded}/>
       )}
       {rightPanel === "activity" && (
         <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>
@@ -996,6 +1040,10 @@ export function ChatApp() {
         <CreateChannelDialog users={bootstrap.users} me={me} onClose={() => setDialog(null)} onCreated={conversation => { addConversation(conversation); setDialog(null); openConversation(conversation.id); }}/>
       )}
       {dialog === "help" && <HelpDialog onClose={() => setDialog(null)}/>}
+      {forwarding && (
+        <ForwardDialog message={forwarding} conversations={bootstrap.conversations} users={bootstrap.users} me={me} usersById={usersById} label={label}
+          onForward={(targets, comment) => forwardMessage(forwarding, targets, comment)} onClose={() => setForwarding(null)}/>
+      )}
     </main>
   );
 }

@@ -44,3 +44,8 @@
 **Decision:** `PinnedConversation` is a channel or DM pinned to the top of one user's sidebar. Bootstrap and `GET /api/conversations` return the pinned ids in pin order, and changes are delivered only to the user's own room (`pins:update`, carrying the full list), never on `ConversationSummary`, which is broadcast to other people.  
 **Reason:** Per-viewer state on broadcast payloads would leak who pinned what; sending the whole list keeps tabs correct even if events repeat or arrive out of order.  
 **Note:** Pins of conversations the user can no longer see are hidden rather than deleted, so they return if access does. Limit: 50 per user.
+
+## ADR-010: Forwarded messages quote their original live
+**Decision:** A forward is an ordinary message with `forwardedFromId` set; its body is the forwarder's optional comment. `ChatMessage.forwarded` carries the original's current author, body, files and source, and when the original is edited or deleted the worker re-emits `message:updated` for its newest 200 live forwards. Forwarding a bare forward (no comment or files) quotes its original, so cards never nest. Forwards stay within the workspace, and the sender must be able to see the original.  
+**Reason:** A live reference means deleting a message removes it everywhere it was shared, which a copied snapshot could not do.  
+**Note:** The card is seen by people who may not be able to see the source, so only public channels are named ("a private channel" / "a direct message" otherwise). Forwarding is the act of sharing: a live forward lets anyone who can see it download the original's files. The "View message" link only appears for viewers who can open the source conversation.

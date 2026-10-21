@@ -1,15 +1,16 @@
 "use client";
 
 import { FormEvent, Fragment, KeyboardEvent, useEffect, useMemo, useState } from "react";
-import { Bell, BellOff, Hash, HelpCircle, Link2, Loader2, Lock, LogOut, Plus, Search } from "lucide-react";
+import { Bell, BellOff, Check, Hash, HelpCircle, Link2, Loader2, Lock, LogOut, Plus, Search, ShieldAlert, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, Popover } from "@/components/ui/overlay";
 import { dayLabel, timeLabel } from "@/components/chat/helpers";
+import { ForwardedCard, forwardSourceLabel } from "@/components/chat/message-item";
 import { api } from "@/lib/api";
 import { mentionsToText } from "@/lib/mentions";
 import { cn, HIGHLIGHT_END, HIGHLIGHT_START } from "@/lib/utils";
-import type { ChatUser, ConversationSummary, SearchHit } from "@/lib/types";
+import type { ChatForward, ChatMessage, ChatUser, ConversationSummary, SearchHit } from "@/lib/types";
 
 type JumpItem = { key: string; label: string; icon: React.ReactNode; run: () => void };
 
@@ -199,6 +200,137 @@ export function CreateChannelDialog({ users, me, onCreated, onClose }: { users: 
   );
 }
 
+// A channel, or a person (whose DM may not exist yet).
+export type ForwardTarget = { kind: "conversation"; id: string } | { kind: "person"; userId: string };
+const MAX_FORWARD_TARGETS = 10;
+
+// What the forward will quote: the message itself, or the original if it is a bare forward (the server does
+// the same, so cards never nest).
+function quotedForward(message: ChatMessage, conversation: ConversationSummary | undefined): ChatForward {
+  if (message.forwarded && !message.body && !message.attachments.length) return message.forwarded;
+  return {
+    messageId: message.id,
+    conversationId: message.conversationId,
+    parentId: message.parentId,
+    conversation: { type: conversation?.type ?? "CHANNEL", isPrivate: conversation?.isPrivate ?? true, name: conversation && !conversation.isPrivate ? conversation.name : null },
+    author: message.author,
+    body: message.body,
+    createdAt: message.createdAt,
+    editedAt: message.editedAt,
+    deleted: false,
+    attachments: message.attachments
+  };
+}
+
+// Forward (share) a message to channels and people, with an optional comment.
+export function ForwardDialog({ message, conversations, users, me, usersById, label, onForward, onClose }: {
+  message: ChatMessage;
+  conversations: ConversationSummary[];
+  users: ChatUser[];
+  me: ChatUser;
+  usersById: Map<string, ChatUser>;
+  label: (conversation: ConversationSummary) => string;
+  onForward: (targets: ForwardTarget[], comment: string) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [comment, setComment] = useState("");
+  const [pending, setPending] = useState(false);
+
+  const quoted = useMemo(() => quotedForward(message, conversations.find(c => c.id === message.conversationId)), [message, conversations]);
+  const options = useMemo(() => {
+    const dmByPartner = new Map(conversations.filter(c => c.type === "DM").map(c => [c.memberIds.find(id => id !== me.id) ?? me.id, c]));
+    return [
+      ...conversations.filter(c => c.type === "CHANNEL").sort((a, b) => a.name.localeCompare(b.name)).map(c => ({
+        key: c.id, label: c.name, chip: `#${c.name}`, search: c.name, icon: c.isPrivate ? <Lock size={14}/> : <Hash size={14}/>, target: { kind: "conversation", id: c.id } as ForwardTarget
+      })),
+      ...[...users].sort((a, b) => Number(b.id === me.id) - Number(a.id === me.id) || a.displayName.localeCompare(b.displayName)).map(user => {
+        const dm = dmByPartner.get(user.id);
+        return {
+          key: dm?.id ?? `person:${user.id}`, label: user.id === me.id ? `${user.displayName} (you)` : user.displayName, chip: user.displayName, search: user.displayName.toLowerCase(),
+          icon: <Avatar name={user.displayName} color={user.avatarColor} size="sm"/>,
+          target: (dm ? { kind: "conversation", id: dm.id } : { kind: "person", userId: user.id }) as ForwardTarget
+        };
+      })
+    ];
+  }, [conversations, users, me.id]);
+  const q = query.trim().toLowerCase().replace(/^[#@]/, "");
+  const visible = options.filter(option => option.search.includes(q));
+  const picked = selected.flatMap(key => options.find(option => option.key === key) ?? []);
+  // Sharing out of a private channel or DM shows it to people who may not be in it.
+  const leavesPrivate = quoted.conversation.type === "DM" || quoted.conversation.isPrivate
+    ? picked.some(option => option.target.kind === "person" || option.target.id !== quoted.conversationId)
+    : false;
+
+  function toggle(key: string) {
+    setSelected(current => current.includes(key) ? current.filter(item => item !== key) : current.length < MAX_FORWARD_TARGETS ? [...current, key] : current);
+  }
+
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
+    if (!picked.length || pending) return;
+    setPending(true);
+    try {
+      if (await onForward(picked.map(option => option.target), comment.trim())) onClose();
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog title="Forward message" onClose={onClose} className="max-w-lg">
+      <form onSubmit={submit} className="space-y-4 p-5">
+        <div>
+          <div className="flex min-h-[38px] flex-wrap items-center gap-1.5 rounded-lg border border-zinc-200 px-2 py-1.5 transition focus-within:border-brand-300 focus-within:ring-4 focus-within:ring-brand-100/60">
+            {picked.map(option => (
+              <span key={option.key} className="flex items-center gap-1 rounded-md bg-brand-50 py-0.5 pl-1.5 pr-0.5 text-xs font-medium text-brand-700">
+                {option.chip}
+                <button type="button" onClick={() => toggle(option.key)} aria-label={`Remove ${option.label}`} className="rounded p-0.5 text-brand-400 transition hover:bg-brand-100 hover:text-brand-700"><X size={11}/></button>
+              </span>
+            ))}
+            <input autoFocus value={query} onChange={event => setQuery(event.target.value)} aria-label="Search channels and people"
+              onKeyDown={event => {
+                if (event.key === "Enter") { event.preventDefault(); if (visible[0]) { toggle(visible[0].key); setQuery(""); } }
+                if (event.key === "Backspace" && !query && selected.length) setSelected(current => current.slice(0, -1));
+              }}
+              placeholder={picked.length ? "" : "Add channels or people"} className="min-w-[8rem] flex-1 bg-transparent px-1 text-sm outline-none placeholder:text-zinc-400"/>
+          </div>
+          <div className="mt-1.5 max-h-40 space-y-0.5 overflow-y-auto rounded-lg border border-zinc-200 p-1.5">
+            {visible.map(option => {
+              const on = selected.includes(option.key);
+              return (
+                <button type="button" key={option.key} onClick={() => toggle(option.key)} disabled={!on && selected.length >= MAX_FORWARD_TARGETS}
+                  className={cn("flex h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-[13px] transition disabled:opacity-40", on ? "bg-brand-50 text-brand-800" : "text-zinc-700 hover:bg-zinc-50")}>
+                  <span className="text-zinc-400">{option.icon}</span><span className="truncate">{option.label}</span>
+                  {on && <Check size={14} className="ml-auto text-brand-600"/>}
+                </button>
+              );
+            })}
+            {visible.length === 0 && <p className="px-2 py-1.5 text-xs text-zinc-400">No channels or people match “{query.trim()}”.</p>}
+          </div>
+        </div>
+        <label className="block text-[13px] font-medium text-zinc-700">Add a message <span className="font-normal text-zinc-400">(optional)</span>
+          <textarea value={comment} onChange={event => setComment(event.target.value)} rows={2} maxLength={4000}
+            onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); } }}
+            className="mt-1.5 w-full resize-y rounded-lg border border-zinc-200 px-3 py-2 text-sm font-normal outline-none transition focus:border-brand-300 focus:ring-4 focus:ring-brand-100/60"/>
+        </label>
+        <ForwardedCard forward={quoted} usersById={usersById} meId={me.id}/>
+        {leavesPrivate && (
+          <p className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-4 text-amber-800">
+            <ShieldAlert size={14} className="mt-px shrink-0"/>This message is from {forwardSourceLabel(quoted)}. Everyone where you forward it will be able to read it and open its files.
+          </p>
+        )}
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <span className="mr-auto text-[11px] text-zinc-400">{picked.length ? `${picked.length} of ${MAX_FORWARD_TARGETS}` : "Pick up to 10"}</span>
+          <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button type="submit" disabled={pending || !picked.length}>{pending ? "Forwarding…" : "Forward"}</Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
 const SHORTCUTS: [string, string][] = [
   ["⌘ K / Ctrl K", "Jump to a conversation or search messages"],
   ["Enter", "Send message"],
@@ -217,7 +349,7 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
           ))}
         </tbody></table>
         <ul className="list-disc space-y-1.5 pl-4 leading-5">
-          <li>Hover a message to react, reply in a thread, edit or delete it.</li>
+          <li>Hover a message to react, reply in a thread, forward, edit or delete it.</li>
           <li>Type <b>@</b> (or use the @ button) to mention someone; mentions appear in their Activity.</li>
           <li>Drop or paste files into the composer. Files are scanned for malware before anyone can download them.</li>
           <li>Search supports <b>"exact phrases"</b>, <b>OR</b> and <b>-excluded</b> words.</li>

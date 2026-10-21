@@ -27,6 +27,22 @@ export type ChatLinkPreview = {
   imageUrl: string | null;
 };
 
+// The original of a forwarded message, shown as a quoted card. It is live: edits to the original show up
+// here, and a deleted original leaves only `deleted`. The card is seen by people who may not be able to see
+// the original conversation, so only public channels are named.
+export type ChatForward = {
+  messageId: string;
+  conversationId: string;
+  parentId: string | null;
+  conversation: { type: "CHANNEL" | "DM"; isPrivate: boolean; name: string | null };
+  author: ChatUser;
+  body: string;
+  createdAt: string;
+  editedAt: string | null;
+  deleted: boolean;
+  attachments: ChatAttachment[];
+};
+
 export type ChatMessage = {
   id: string;
   conversationId: string;
@@ -43,6 +59,7 @@ export type ChatMessage = {
   reactions: ReactionSummary[];
   attachments: ChatAttachment[];
   linkPreviews: ChatLinkPreview[];
+  forwarded: ChatForward | null;
 };
 
 export type MessagePage = { messages: ChatMessage[]; nextCursor: string | null };

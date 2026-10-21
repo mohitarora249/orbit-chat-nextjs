@@ -12,12 +12,26 @@ type Handlers = { [T in OutboxEventType]: (payload: OutboxPayloads[T]) => Promis
 type ClaimedEvent = { id: bigint; type: OutboxEventType; payload: unknown; attempts: number };
 
 const MAX_ATTEMPTS = 8;
+// Forwards refreshed live when their original is edited or deleted; older ones catch up on their next load.
+const MAX_FORWARD_FANOUT = 200;
 const POLL_INTERVAL_MS = 1000;
 
 async function emitMessage(io: Server, messageId: string, event: "message:new" | "message:updated") {
   const message = await prisma.message.findUnique({ where: { id: messageId }, select: messageSelect });
   if (!message) return;
   io.to(`conversation:${message.conversationId}`).emit(event, serializeMessage(message));
+}
+
+// Forwards quote their original live, so a change to a message changes them too.
+async function emitUpdated(io: Server, messageId: string) {
+  await emitMessage(io, messageId, "message:updated");
+  const forwards = await prisma.message.findMany({
+    where: { forwardedFromId: messageId, deletedAt: null },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: MAX_FORWARD_FANOUT,
+    select: messageSelect
+  });
+  for (const forward of forwards) io.to(`conversation:${forward.conversationId}`).emit("message:updated", serializeMessage(forward));
 }
 
 function createHandlers(io: Server): Handlers {
@@ -28,7 +42,7 @@ function createHandlers(io: Server): Handlers {
       const reply = await prisma.message.findUnique({ where: { id: messageId }, select: { parentId: true } });
       if (reply?.parentId) await emitMessage(io, reply.parentId, "message:updated");
     },
-    "message.updated": ({ messageId }) => emitMessage(io, messageId, "message:updated"),
+    "message.updated": ({ messageId }) => emitUpdated(io, messageId),
     // Fetch failures are stored as FAILED previews, not thrown, so only database errors are retried.
     "message.unfurl": async ({ messageId }) => {
       const links = await prisma.messageLink.findMany({ where: { messageId }, select: { url: true } });
@@ -76,7 +90,7 @@ function createHandlers(io: Server): Handlers {
         data: { status: result.clean ? "CLEAN" : "INFECTED", scannedAt: new Date() },
         select: { messageId: true }
       });
-      if (scanned.messageId) await emitMessage(io, scanned.messageId, "message:updated");
+      if (scanned.messageId) await emitUpdated(io, scanned.messageId);
     }
   };
 }

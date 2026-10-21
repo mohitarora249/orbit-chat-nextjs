@@ -28,14 +28,14 @@ reconnect if still idle). A user is `away` when all of their sockets are idle, `
 ## Server -> client
 
 All message payloads use the `ChatMessage` shape from `src/lib/types.ts`: author, reactions, attachments,
-link previews, thread fields, `editedAt`, and `deletedAt` (a deleted message has an empty body and no reactions,
-attachments or link previews). `linkPreviews` is usually empty in `message:new` and filled in by a later `message:updated`.
+link previews, thread fields, `editedAt`, `deletedAt` (a deleted message has an empty body and no reactions,
+attachments, link previews or forward), and `forwarded` (the quoted original of a forward, with `deleted: true` once it is gone). `linkPreviews` is usually empty in `message:new` and filled in by a later `message:updated`.
 
 | Event | Payload | Sent when |
 |---|---|---|
 | `session:ready` | none | After the server has joined the socket's rooms |
 | `message:new` | `ChatMessage` | A message or thread reply was created |
-| `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, a thread got a reply, an attachment scan finished, or its link previews were fetched |
+| `message:updated` | `ChatMessage` | A message was edited or deleted, a reaction changed, a thread got a reply, an attachment scan finished, its link previews were fetched, or the original it forwards changed |
 | `conversation:created` | `ConversationSummary` | A channel or DM that the user can see was created |
 | `conversation:read` | `{ conversationId, lastReadAt }` | The same user read a conversation (keeps tabs in sync) |
 | `presence:update` | `{ userId, presence }` (`"active"`, `"away"` or `"offline"`) | A user's socket connected, went idle or active, or disconnected (after a 5-second grace period). May repeat the current value |

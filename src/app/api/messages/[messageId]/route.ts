@@ -29,7 +29,7 @@ export async function PATCH(request: NextRequest, context: Context) {
     const { user, message } = loaded;
     if (message.authorId !== user.id) return jsonError("You can only edit your own messages.", 403);
     const { body } = await parseJson(request, editSchema);
-    if (!body && !(await prisma.attachment.count({ where: { messageId: message.id } }))) {
+    if (!body && !message.forwardedFromId && !(await prisma.attachment.count({ where: { messageId: message.id } }))) {
       return jsonError("A message needs text or an attachment.", 400);
     }
 

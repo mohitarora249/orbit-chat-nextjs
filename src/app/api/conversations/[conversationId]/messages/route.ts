@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { accessErrors, getConversationAccess } from "@/lib/access";
+import { accessErrors, getConversationAccess, requireMessageAccess } from "@/lib/access";
 import { cursorWhere, decodeCursor, encodeCursor, messageSelect, parseLimit, serializeMessage, syncMessageLinks } from "@/lib/messages";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
@@ -18,8 +18,10 @@ const createMessageSchema = z.object({
   body: z.string().trim().max(4000),
   clientMessageId: z.string().min(8).max(100),
   parentId: z.string().min(1).optional(),
-  attachmentIds: z.array(z.string().min(1)).max(10).default([])
-}).refine(input => input.body.length > 0 || input.attachmentIds.length > 0, "A message needs text or an attachment.");
+  attachmentIds: z.array(z.string().min(1)).max(10).default([]),
+  // Forwards (shares) this message into the conversation; `body` is then an optional comment.
+  forwardedMessageId: z.string().min(1).max(64).optional()
+}).refine(input => input.body.length > 0 || input.attachmentIds.length > 0 || input.forwardedMessageId, "A message needs text or an attachment.");
 
 type Context = { params: Promise<{ conversationId: string }> };
 
@@ -81,6 +83,24 @@ function replayResponse(existing: Prisma.MessageGetPayload<{ select: typeof exis
   return NextResponse.json({ message: serializeMessage(existing) });
 }
 
+// The message to quote when forwarding `messageId`. Forwarding a bare forward (no comment or files of its
+// own) quotes its original instead, so cards never nest.
+async function resolveForward(userId: string, messageId: string, workspaceId: string) {
+  const source = await requireMessageAccess(userId, messageId);
+  if (source.deletedAt) throw new HttpError(409, "That message was deleted.");
+  if (source.conversation.workspaceId !== workspaceId) throw new HttpError(400, "Messages can only be forwarded within their workspace.");
+  const { body, forwardedFromId, _count } = await prisma.message.findUniqueOrThrow({
+    where: { id: source.id },
+    select: { body: true, forwardedFromId: true, _count: { select: { attachments: true } } }
+  });
+  if (forwardedFromId && !body && !_count.attachments) {
+    const original = await prisma.message.findUnique({ where: { id: forwardedFromId }, select: { deletedAt: true } });
+    if (!original || original.deletedAt) throw new HttpError(409, "The original message was deleted.");
+    return forwardedFromId;
+  }
+  return source.id;
+}
+
 // Persists the message and its outbox event in one transaction. Live delivery is done by the outbox worker,
 // so it happens even if the browser disconnects right after this request.
 export async function POST(request: NextRequest, context: Context) {
@@ -88,13 +108,19 @@ export async function POST(request: NextRequest, context: Context) {
     const { user, error } = await requireUser(request);
     if (error) return error;
     const { conversationId } = await context.params;
-    const { body, clientMessageId, parentId, attachmentIds } = await parseJson(request, createMessageSchema);
+    const { body, clientMessageId, parentId, attachmentIds, forwardedMessageId } = await parseJson(request, createMessageSchema);
 
     const access = await getConversationAccess(user.id, conversationId);
     if (access !== "ok") return jsonError(accessErrors[access].error, accessErrors[access].status);
 
     const existing = await findExistingMessage(user.id, clientMessageId);
     if (existing) return replayResponse(existing, conversationId);
+
+    let forwardedFromId: string | undefined;
+    if (forwardedMessageId) {
+      const { workspaceId } = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId }, select: { workspaceId: true } });
+      forwardedFromId = await resolveForward(user.id, forwardedMessageId, workspaceId);
+    }
 
     try {
       const messageId = await prisma.$transaction(async tx => {
@@ -105,7 +131,7 @@ export async function POST(request: NextRequest, context: Context) {
           if (parent.deletedAt) throw new HttpError(409, "That message was deleted.");
         }
         const message = await tx.message.create({
-          data: { conversationId, authorId: user.id, clientMessageId, body, parentId },
+          data: { conversationId, authorId: user.id, clientMessageId, body, parentId, forwardedFromId },
           select: { id: true, createdAt: true }
         });
         if (attachmentIds.length) {

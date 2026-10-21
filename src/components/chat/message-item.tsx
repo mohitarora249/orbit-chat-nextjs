@@ -1,14 +1,14 @@
 "use client";
 
 import { Fragment, KeyboardEvent, memo, useState } from "react";
-import { AlertTriangle, Download, FileText, Loader2, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2 } from "lucide-react";
+import { AlertTriangle, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
 import { parseLinks } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets, parseMentions } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
-import type { ChatAttachment, ChatLinkPreview, ChatMessage, ChatUser } from "@/lib/types";
+import type { ChatAttachment, ChatForward, ChatLinkPreview, ChatMessage, ChatUser } from "@/lib/types";
 
 const INLINE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -17,6 +17,9 @@ export type MessageActions = {
   onEdit: (message: ChatMessage, body: string) => Promise<void>;
   onDelete: (message: ChatMessage) => void;
   onOpenThread?: (message: ChatMessage) => void;
+  onForward: (message: ChatMessage) => void;
+  // Jumps to the original of a forwarded message; returns null if the viewer cannot see its conversation.
+  openForwarded: (forward: ChatForward) => (() => void) | null;
 };
 
 type Props = MessageActions & {
@@ -106,7 +109,48 @@ function LinkPreviewCard({ preview }: { preview: ChatLinkPreview }) {
   );
 }
 
-function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, onReact, onEdit, onDelete, onOpenThread }: Props) {
+export function forwardSourceLabel(forward: Pick<ChatForward, "conversation">) {
+  const { type, isPrivate, name } = forward.conversation;
+  return type === "DM" ? "a direct message" : isPrivate || !name ? "a private channel" : `#${name}`;
+}
+
+// The quoted original of a forwarded message.
+export function ForwardedCard({ forward, usersById, meId, onOpen }: { forward: ChatForward; usersById: Map<string, ChatUser>; meId: string; onOpen?: (() => void) | null }) {
+  const SourceIcon = forward.conversation.type === "DM" ? User : forward.conversation.isPrivate ? Lock : Hash;
+  const source = forwardSourceLabel(forward);
+  return (
+    <div className="mt-1 w-full max-w-xl rounded-lg border border-l-[3px] border-zinc-200 border-l-brand-300 bg-zinc-50/60 px-3 py-2">
+      {forward.deleted ? (
+        <p className="text-[13px] italic leading-5 text-zinc-400">The original message was deleted.</p>
+      ) : (
+        <>
+          <div className="flex items-center gap-2">
+            <Avatar name={forward.author.displayName} color={forward.author.avatarColor} size="sm"/>
+            <span className="truncate text-[13px] font-semibold text-zinc-900">{forward.author.displayName}</span>
+          </div>
+          {forward.body && (
+            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-800">
+              <MessageBody body={forward.body} usersById={usersById} meId={meId}/>
+              {forward.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(forward.editedAt)} at ${timeLabel(forward.editedAt)}`}>(edited)</span>}
+            </p>
+          )}
+          {forward.attachments.length > 0 && (
+            <div className="mt-1.5 flex flex-col gap-2">{forward.attachments.map(attachment => <AttachmentView key={attachment.id} attachment={attachment}/>)}</div>
+          )}
+        </>
+      )}
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-[11px] text-zinc-400">
+        <SourceIcon size={11} className="shrink-0"/>
+        <span>{forward.parentId ? `Thread in ${source}` : `Posted in ${source}`}</span>
+        <span aria-hidden>·</span>
+        <time dateTime={forward.createdAt}>{dayLabel(forward.createdAt)} at {timeLabel(forward.createdAt)}</time>
+        {onOpen && !forward.deleted && <><span aria-hidden>·</span><button onClick={onOpen} className="font-medium text-brand-600 transition hover:text-brand-700 hover:underline">View message</button></>}
+      </div>
+    </div>
+  );
+}
+
+function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, onReact, onEdit, onDelete, onOpenThread, onForward, openForwarded }: Props) {
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -176,6 +220,12 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
             </p>
           )
         )}
+        {!deleted && message.forwarded && (
+          <>
+            {!message.body && <p className="flex items-center gap-1 text-xs text-zinc-400"><Forward size={12}/>Forwarded a message</p>}
+            <ForwardedCard forward={message.forwarded} usersById={usersById} meId={me.id} onOpen={openForwarded(message.forwarded)}/>
+          </>
+        )}
         {!deleted && !editing && message.linkPreviews.length > 0 && (
           <div className="mt-1.5 flex flex-col gap-2">{message.linkPreviews.map(preview => <LinkPreviewCard key={preview.url} preview={preview}/>)}</div>
         )}
@@ -206,6 +256,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
         <div className={cn("absolute -top-4 right-2 z-10 items-center gap-0.5 rounded-lg border border-zinc-200/80 bg-white p-0.5 shadow-float", picker ? "flex" : "hidden group-hover:flex group-focus-within:flex")}>
           <button title="Add reaction" aria-label="Add reaction" onClick={() => setPicker(true)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><SmilePlus size={15}/></button>
           {onOpenThread && <button title="Reply in thread" aria-label="Reply in thread" onClick={() => onOpenThread(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><MessageSquareText size={15}/></button>}
+          <button title="Forward message" aria-label="Forward message" onClick={() => onForward(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Forward size={15}/></button>
           {mine && <button title="Edit message" aria-label="Edit message" onClick={startEdit} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
           {(mine || canModerate) && <button title="Delete message" aria-label="Delete message" onClick={() => onDelete(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14}/></button>}
           {picker && (

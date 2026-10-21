@@ -41,7 +41,7 @@ export function visibleConversationsWhere(userId: string, workspaceId?: string):
 export async function requireMessageAccess(userId: string, messageId: string) {
   const message = await prisma.message.findUnique({
     where: { id: messageId },
-    select: { id: true, conversationId: true, authorId: true, parentId: true, deletedAt: true, conversation: { select: { workspaceId: true } } }
+    select: { id: true, conversationId: true, authorId: true, parentId: true, forwardedFromId: true, deletedAt: true, conversation: { select: { workspaceId: true } } }
   });
   if (!message) throw new HttpError(404, "Message not found.");
   const access = await getConversationAccess(userId, message.conversationId);

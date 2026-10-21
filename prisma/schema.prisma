@@ -169,6 +169,8 @@ model Message {
   // Thread replies point at their top-level parent; threads are one level deep.
   parentId        String?
   replyCount      Int                      @default(0)
+  // A forwarded (shared) message shows the original as a quoted card. The body is the forwarder's own comment.
+  forwardedFromId String?
   lastReplyAt     DateTime?
   createdAt       DateTime                 @default(now())
   editedAt        DateTime?
@@ -179,6 +181,8 @@ model Message {
   author          User                     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   parent          Message?                 @relation("Thread", fields: [parentId], references: [id], onDelete: Cascade)
   replies         Message[]                @relation("Thread")
+  forwardedFrom   Message?                 @relation("Forward", fields: [forwardedFromId], references: [id], onDelete: SetNull)
+  forwards        Message[]                @relation("Forward")
   reactions       Reaction[]
   attachments     Attachment[]
   links           MessageLink[]
@@ -186,6 +190,7 @@ model Message {
   @@unique([authorId, clientMessageId])
   @@index([conversationId, createdAt, id])
   @@index([parentId, createdAt, id])
+  @@index([forwardedFromId])
   @@index([authorId, createdAt])
   @@index([searchVector], type: Gin)
 }
