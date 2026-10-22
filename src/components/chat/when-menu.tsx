@@ -44,6 +44,9 @@ export function WhenMenu({ title, options, submitLabel, onPick, onClose, classNa
 
   function submitCustom(event: FormEvent) {
     event.preventDefault();
+    // The composer renders this menu inside its own <form>, and React bubbles submit to it: without this,
+    // picking a custom time would also send the message straight away.
+    event.stopPropagation();
     // Without a zone, Date parses it as local time.
     const at = new Date(custom);
     if (Number.isNaN(at.getTime())) return setError("Pick a date and time.");
