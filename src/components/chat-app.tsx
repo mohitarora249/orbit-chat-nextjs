@@ -15,7 +15,8 @@ import { ActivityPanel, PeoplePanel, RemindersPanel, ThreadPanel, type ThreadSta
 import { CommandPalette, CreateChannelDialog, CreatePollDialog, ForwardDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type ForwardTarget, type NotificationPrefs, type PollDraft } from "@/components/chat/dialogs";
 import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
 import { BrowseChannelsDialog, ChannelDetailsDialog, channelPermissions, type ChannelTab } from "@/components/chat/channels";
-import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, keepMyVotes, mergeMessages, myPollVotes, timeLabel, upsertMessage, withVote } from "@/components/chat/helpers";
+import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, keepMyVotes, keepUnsent, mergeMessages, timeLabel, upsertMessage } from "@/components/chat/helpers";
+import { applyOps, failureText, opKey, opsByMessage, outgoing, withOps, type MessageOp, type OpChange, type PendingOps } from "@/components/chat/pending";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { parsePollArgs, parseReminder, parseStatus, reminderTimeLabel, type SlashCommandName } from "@/lib/commands";
@@ -109,6 +110,8 @@ export function ChatApp() {
   const [editRequest, setEditRequest] = useState<EditRequest | null>(null);
   // My reminders that are not done: gone off (firedAt set) or waiting, soonest first.
   const [reminders, setReminders] = useState<ChatReminder[]>([]);
+  // Sends, reactions, edits and deletes shown before the server confirms them, or that failed (see pending.ts).
+  const [ops, setOps] = useState<PendingOps>({});
 
   const socketRef = useRef<Socket | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -129,7 +132,12 @@ export function ChatApp() {
   // A dialog or menu is open: it handles Esc and arrow keys itself.
   const overlayOpenRef = useRef(false);
   const remindersRef = useRef(reminders);
+  const opsRef = useRef(ops);
+  const opSeqRef = useRef(0);
+  // Sends go out one at a time, so messages arrive in the order they were written.
+  const sendQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   bootstrapRef.current = bootstrap;
+  opsRef.current = ops;
   remindersRef.current = reminders;
   overlayOpenRef.current = dialog !== null || menu !== null || forwarding !== null || pollDraft !== null;
   prefsRef.current = prefs;
@@ -137,6 +145,7 @@ export function ChatApp() {
   threadIdRef.current = thread?.parentId ?? null;
 
   const me = bootstrap?.me ?? null;
+  const meId = me?.id;
   const usersById = useMemo(() => new Map((bootstrap?.users ?? []).map(user => [user.id, user])), [bootstrap?.users]);
   const label = useCallback((conversation: ConversationSummary) => conversationLabel(conversation, me?.id ?? "", usersById), [me?.id, usersById]);
   const activeConversation = useMemo(() => bootstrap?.conversations.find(c => c.id === activeId) ?? null, [bootstrap, activeId]);
@@ -240,6 +249,15 @@ export function ChatApp() {
     saves.set(conversationId, entry);
   }, [setDraft]);
 
+  // My messages the server has, by clientMessageId: their sends are done, even if the request itself failed
+  // after the message was saved.
+  const confirmSends = useCallback((messages: ChatMessage[]) => {
+    const done = new Set(messages.map(message => `send:${message.clientMessageId}`));
+    setOps(current => Object.keys(current).some(key => done.has(key))
+      ? Object.fromEntries(Object.entries(current).filter(([key]) => !done.has(key)))
+      : current);
+  }, []);
+
   const fetchPage = useCallback((conversationId: string, options: { cursor?: string | null; signal?: AbortSignal } = {}) => {
     const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
     if (options.cursor) params.set("cursor", options.cursor);
@@ -254,6 +272,7 @@ export function ChatApp() {
       const page = await fetchPage(conversationId, { signal: options.signal });
       // A slow response for a conversation the user has already left must not overwrite the current one.
       if (activeIdRef.current !== conversationId) return;
+      confirmSends(page.messages);
       setHistory(current => {
         const own = current.messages.filter(message => message.conversationId === conversationId);
         const confirmed = own.filter(message => !isOptimistic(message));
@@ -272,7 +291,7 @@ export function ChatApp() {
       if (options.signal?.aborted || activeIdRef.current !== conversationId) return;
       setNotice(error instanceof Error ? error.message : "Unable to load messages.");
     }
-  }, [fetchPage]);
+  }, [fetchPage, confirmSends]);
 
   const loadOlder = useCallback(async () => {
     const conversationId = activeIdRef.current;
@@ -297,7 +316,8 @@ export function ChatApp() {
     activeIdRef.current = activeId;
     if (!activeId) return;
     const controller = new AbortController();
-    setHistory(emptyHistory);
+    // Unsent messages are kept across conversation switches; loadMessages keeps them after the newest page.
+    setHistory({ ...emptyHistory, messages: outgoing(opsRef.current, activeId, null) });
     jumpPagesRef.current = 0;
     setUnreadMarker(bootstrapRef.current?.conversations.find(c => c.id === activeId)?.lastReadAt ?? null);
     void loadMessages(activeId, { signal: controller.signal });
@@ -318,9 +338,16 @@ export function ChatApp() {
   // spinner, channel intro); every other row is one message with its day divider, unread line and "Seen".
   // Anchoring to the end keeps the reader's place when older pages are prepended or rows above resize, and
   // follows new messages while the reader is at the bottom.
-  const getRowKey = useCallback((index: number) => index === 0 ? "header" : history.messages[index - 1].id, [history.messages]);
+  const opsForMessage = useMemo(() => opsByMessage(ops), [ops]);
+  const messages = useMemo(() => meId ? applyOps(history.messages, opsForMessage, meId) : history.messages, [history.messages, opsForMessage, meId]);
+  const shownThread = useMemo(() => thread && meId ? {
+    ...thread,
+    parent: thread.parent && withOps(thread.parent, opsForMessage.get(thread.parent.id), meId),
+    replies: applyOps(thread.replies, opsForMessage, meId)
+  } : thread, [thread, opsForMessage, meId]);
+  const getRowKey = useCallback((index: number) => index === 0 ? "header" : messages[index - 1].id, [messages]);
   const virtualizer = useVirtualizer({
-    count: history.messages.length + 1,
+    count: messages.length + 1,
     getScrollElement: () => scrollRef.current,
     getItemKey: getRowKey,
     estimateSize: index => index === 0 ? 0 : 64,
@@ -441,6 +468,7 @@ export function ChatApp() {
     const seeing = document.visibilityState === "visible" && (message.parentId
       ? threadIdRef.current === message.parentId
       : message.conversationId === activeIdRef.current);
+    if (state && message.authorId === state.me.id) confirmSends([message]);
     if (message.parentId) {
       setThread(current => current && current.parentId === message.parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
       if (mention && !seeing) updateConversation(message.conversationId, c => ({ ...c, mentionCount: c.mentionCount + 1 }));
@@ -463,13 +491,80 @@ export function ChatApp() {
       playSound(mention || conversation?.type === "DM" ? "mention" : "message");
     }
     notify(message);
-  }, [notify, updateConversation]);
+  }, [notify, updateConversation, confirmSends]);
 
   useEffect(() => primeSounds(), []);
 
+  // ---- Unconfirmed changes (see pending.ts) ---------------------------------------------------------------
+
+  // Adds (or confirms) a message in the open conversation or thread.
+  const placeMessage = useCallback((message: ChatMessage) => {
+    if (message.parentId) setThread(current => current?.parentId === message.parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
+    else if (activeIdRef.current === message.conversationId) setHistory(current => ({ ...current, messages: upsertMessage(current.messages, message) }));
+  }, []);
+
+  const dropMessage = useCallback((clientMessageId: string) => {
+    const drop = (list: ChatMessage[]) => list.filter(item => item.clientMessageId !== clientMessageId);
+    setHistory(current => ({ ...current, messages: drop(current.messages) }));
+    setThread(current => current && { ...current, replies: drop(current.replies) });
+  }, []);
+
+  const opRequest = useCallback((change: OpChange) => {
+    if (change.kind === "send") {
+      const { conversationId, clientMessageId, body, parentId, attachments } = change.message;
+      const run = sendQueueRef.current.then(() => api<{ message: ChatMessage }>(`/api/conversations/${conversationId}/messages`, {
+        method: "POST",
+        // clientMessageId makes this idempotent, so a retry never posts the message twice.
+        json: { body, clientMessageId, parentId: parentId ?? undefined, attachmentIds: attachments.map(attachment => attachment.id) }
+      }));
+      sendQueueRef.current = run.catch(() => undefined);
+      return run;
+    }
+    if (change.kind === "react") return api<{ message: ChatMessage }>(`/api/messages/${change.messageId}/reactions`, { method: change.add ? "PUT" : "DELETE", json: { emoji: change.emoji } });
+    if (change.kind === "edit") return api<{ message: ChatMessage }>(`/api/messages/${change.messageId}`, { method: "PATCH", json: { body: change.body } });
+    if (change.kind === "vote") return api<{ message: ChatMessage }>(`/api/messages/${change.messageId}/actions`, { method: "POST", json: { action: "poll.vote", optionIds: change.optionIds } });
+    return api<{ message: ChatMessage }>(`/api/messages/${change.messageId}`, { method: "DELETE" });
+  }, []);
+
+  // Shows a change at once and sends it. The server's copy replaces the op when it answers; on failure the op
+  // stays, marked failed, so the message can offer to retry. A newer change of the same kind replaces an op,
+  // and the replaced request's answer is then ignored.
+  const runOp = useCallback(async (change: OpChange) => {
+    const key = opKey(change);
+    const seq = ++opSeqRef.current;
+    const op = { ...change, key, seq, status: "pending", error: null, network: false } as MessageOp;
+    setOps(current => ({ ...current, [key]: op }));
+    try {
+      const { message } = await opRequest(change);
+      if (change.kind === "send") placeMessage(message);
+      else if (opsRef.current[key]?.seq === seq) applyUpdated(message);
+      setOps(current => {
+        if (current[key]?.seq !== seq) return current;
+        // Nothing else can happen to a deleted message.
+        return Object.fromEntries(Object.entries(current).filter(([k, other]) => k !== key && !(change.kind === "delete" && other.messageId === change.messageId)));
+      });
+    } catch (error) {
+      const failed = { ...op, status: "failed", error: failureText(error, "Something went wrong."), network: error instanceof TypeError } as MessageOp;
+      setOps(current => current[key]?.seq === seq ? { ...current, [key]: failed } : current);
+    }
+  }, [opRequest, placeMessage, applyUpdated]);
+
+  const retryOp = useCallback((op: MessageOp) => {
+    if (op.kind === "send") placeMessage(op.message);
+    void runOp(op);
+  }, [runOp, placeMessage]);
+
+  // Gives up on a failed change: an unsent message is discarded and an unsaved edit undone.
+  const dismissOp = useCallback((op: MessageOp) => {
+    setOps(current => {
+      const { [op.key]: _dismissed, ...rest } = current;
+      return rest;
+    });
+    if (op.kind === "send") dropMessage(op.message.clientMessageId);
+  }, [dropMessage]);
+
   // ---- Socket --------------------------------------------------------------------------------------------
 
-  const meId = me?.id;
   useEffect(() => {
     if (!meId) return;
     // The session cookie authenticates the handshake; no identity is sent from the browser.
@@ -481,13 +576,15 @@ export function ChatApp() {
       if (hasConnected) {
         // Events sent while we were offline are not replayed, so catch up from durable state.
         void refreshConversations();
+        // Changes that never reached the server go out again now that it is back.
+        for (const op of Object.values(opsRef.current)) if (op.status === "failed" && op.network) retryOp(op);
         api<{ reminders: ChatReminder[] }>("/api/reminders").then(data => setReminders(data.reminders)).catch(() => undefined);
         const conversationId = activeIdRef.current;
         if (conversationId) void loadMessages(conversationId, { catchUp: true });
         const parentId = threadIdRef.current;
         if (parentId) {
           api<{ parent: ChatMessage; messages: ChatMessage[]; nextCursor: string | null }>(`/api/messages/${parentId}/replies`)
-            .then(data => setThread(current => current?.parentId === parentId ? { ...current, parent: data.parent, replies: mergeMessages(current.replies.filter(r => !isOptimistic(r)), data.messages) } : current))
+            .then(data => setThread(current => current?.parentId === parentId ? { ...current, parent: data.parent, replies: keepUnsent(mergeMessages(current.replies.filter(r => !isOptimistic(r)), data.messages), current.replies) } : current))
             .catch(() => undefined);
         }
       }
@@ -554,7 +651,7 @@ export function ChatApp() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, addConversation, applyDetails, removeConversation, updateConversation, setStatus, setDraft, alertReminder]);
+  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, retryOp, addConversation, applyDetails, removeConversation, updateConversation, setStatus, setDraft, alertReminder]);
 
   // Idle detection: no input in this tab for IDLE_AFTER_MS makes it idle. The server combines all of a
   // person's tabs, so they show as away only when every tab is idle.
@@ -621,50 +718,19 @@ export function ChatApp() {
     const state = bootstrapRef.current;
     if (!state) return false;
     const clientMessageId = crypto.randomUUID();
-    const optimistic: ChatMessage = {
+    const message: ChatMessage = {
       id: `optimistic-${clientMessageId}`, conversationId, authorId: state.me.id, clientMessageId, body, parentId,
       replyCount: 0, lastReplyAt: null, createdAt: new Date().toISOString(), editedAt: null, deletedAt: null,
       author: { id: state.me.id, displayName: state.me.displayName, avatarColor: state.me.avatarColor }, reactions: [], attachments, linkPreviews: [], forwarded: null, poll: null
     };
-    const place = (message: ChatMessage) => {
-      if (parentId) setThread(current => current?.parentId === parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
-      else if (activeIdRef.current === conversationId) setHistory(current => ({ ...current, messages: upsertMessage(current.messages, message) }));
-    };
-    place(optimistic);
-    try {
-      const { message } = await api<{ message: ChatMessage }>(`/api/conversations/${conversationId}/messages`, {
-        method: "POST",
-        json: { body, clientMessageId, parentId: parentId ?? undefined, attachmentIds: attachments.map(attachment => attachment.id) }
-      });
-      place(message);
-      return true;
-    } catch (error) {
-      const drop = (list: ChatMessage[]) => list.filter(item => item.clientMessageId !== clientMessageId);
-      if (parentId) setThread(current => current && { ...current, replies: drop(current.replies) });
-      else setHistory(current => ({ ...current, messages: drop(current.messages) }));
-      setNotice(error instanceof Error ? error.message : "Message could not be sent.");
-      return false;
-    }
-  }, []);
+    placeMessage(message);
+    void runOp({ kind: "send", messageId: message.id, message });
+    return true;
+  }, [placeMessage, runOp]);
 
-  const onReact = useCallback(async (message: ChatMessage, emoji: string, add: boolean) => {
-    const myId = bootstrapRef.current?.me.id;
-    if (!myId) return;
-    // Optimistic toggle; the server response (and the realtime event) carries the canonical counts.
-    const reactions = add
-      ? message.reactions.some(r => r.emoji === emoji)
-        ? message.reactions.map(r => r.emoji === emoji ? { ...r, userIds: [...new Set([...r.userIds, myId])] } : r)
-        : [...message.reactions, { emoji, userIds: [myId] }]
-      : message.reactions.map(r => r.emoji === emoji ? { ...r, userIds: r.userIds.filter(id => id !== myId) } : r).filter(r => r.userIds.length);
-    applyUpdated({ ...message, reactions });
-    try {
-      const result = await api<{ message: ChatMessage }>(`/api/messages/${message.id}/reactions`, { method: add ? "PUT" : "DELETE", json: { emoji } });
-      applyUpdated(result.message);
-    } catch (error) {
-      applyUpdated(message);
-      setNotice(error instanceof Error ? error.message : "Could not update reaction.");
-    }
-  }, [applyUpdated]);
+  const onReact = useCallback((message: ChatMessage, emoji: string, add: boolean) => {
+    void runOp({ kind: "react", messageId: message.id, emoji, add });
+  }, [runOp]);
 
   // Sets the viewer's poll choices on a loaded message (main list or thread), keeping its tallies.
   const setMyVotes = useCallback((messageId: string, optionIds: string[]) => {
@@ -673,19 +739,17 @@ export function ChatApp() {
     setThread(current => current && { ...current, parent: current.parent && update(current.parent), replies: current.replies.map(update) });
   }, []);
 
+  // Votes show at once like other changes; closing and reopening wait for the server.
   const onAction = useCallback(async (message: ChatMessage, action: MessageAction) => {
-    const myId = bootstrapRef.current?.me.id;
-    if (!myId || !message.poll) return;
-    // Votes show at once; the response carries the canonical tallies and our choices.
-    if (action.action === "poll.vote") applyUpdated({ ...message, poll: withVote(message.poll, myId, action.optionIds) });
+    if (!message.poll) return;
+    if (action.action === "poll.vote") return void runOp({ kind: "vote", messageId: message.id, optionIds: action.optionIds });
     try {
       const result = await api<{ message: ChatMessage }>(`/api/messages/${message.id}/actions`, { method: "POST", json: action });
       applyUpdated(result.message);
     } catch (error) {
-      applyUpdated({ ...message, poll: { ...message.poll, myVotes: myPollVotes(message.poll, myId) } });
       setNotice(error instanceof Error ? error.message : "Could not update the poll.");
     }
-  }, [applyUpdated]);
+  }, [applyUpdated, runOp]);
 
   // Posts the poll from the /poll dialog. Throws so the dialog can show what went wrong.
   async function sendPoll(draft: PollDraft) {
@@ -696,8 +760,7 @@ export function ChatApp() {
       method: "POST",
       json: { body: question, clientMessageId: crypto.randomUUID(), parentId: parentId ?? undefined, poll }
     });
-    if (parentId) setThread(current => current?.parentId === parentId ? { ...current, replies: upsertMessage(current.replies, message) } : current);
-    else if (activeIdRef.current === conversationId) setHistory(current => ({ ...current, messages: upsertMessage(current.messages, message) }));
+    placeMessage(message);
     setPollDraft(null);
   }
 
@@ -760,37 +823,27 @@ export function ChatApp() {
     setDialog("details");
   }
 
-  const onEdit = useCallback(async (message: ChatMessage, body: string) => {
-    try {
-      const result = await api<{ message: ChatMessage }>(`/api/messages/${message.id}`, { method: "PATCH", json: { body } });
-      applyUpdated(result.message);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not edit message.");
-      throw error;
-    }
-  }, [applyUpdated]);
+  const onEdit = useCallback((message: ChatMessage, body: string) => {
+    void runOp({ kind: "edit", messageId: message.id, body });
+  }, [runOp]);
 
-  const onDelete = useCallback(async (message: ChatMessage) => {
+  const onDelete = useCallback((message: ChatMessage) => {
     if (!window.confirm("Delete this message? This can't be undone.")) return;
-    try {
-      const result = await api<{ message: ChatMessage }>(`/api/messages/${message.id}`, { method: "DELETE" });
-      applyUpdated(result.message);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not delete message.");
-    }
-  }, [applyUpdated]);
+    void runOp({ kind: "delete", messageId: message.id });
+  }, [runOp]);
 
   const openThread = useCallback(async (parentId: string, parent: ChatMessage | null = null) => {
     setRightPanel("thread");
-    setThread({ parentId, parent, replies: [], nextCursor: null, loading: true });
+    setThread({ parentId, parent, replies: outgoing(opsRef.current, null, parentId), nextCursor: null, loading: true });
     try {
       const data = await api<{ parent: ChatMessage; messages: ChatMessage[]; nextCursor: string | null }>(`/api/messages/${parentId}/replies`);
-      setThread(current => current?.parentId === parentId ? { parentId, parent: data.parent, replies: data.messages, nextCursor: data.nextCursor, loading: false } : current);
+      confirmSends(data.messages);
+      setThread(current => current?.parentId === parentId ? { parentId, parent: data.parent, replies: keepUnsent(data.messages, current.replies), nextCursor: data.nextCursor, loading: false } : current);
     } catch (error) {
       setThread(current => current?.parentId === parentId ? { ...current, loading: false } : current);
       setNotice(error instanceof Error ? error.message : "Could not load thread.");
     }
-  }, []);
+  }, [confirmSends]);
   const onOpenThread = useCallback((message: ChatMessage) => void openThread(message.id, message), [openThread]);
 
   async function loadMoreReplies() {
@@ -886,7 +939,7 @@ export function ChatApp() {
   // Scroll a jumped-to message into view, paging back through history if it is older than what is loaded.
   useEffect(() => {
     if (!highlightId || !history.loaded) return;
-    const index = history.messages.findIndex(message => message.id === highlightId);
+    const index = messages.findIndex(message => message.id === highlightId);
     if (index !== -1) {
       virtualizer.scrollToIndex(index + 1, { align: "center" });
       const timer = setTimeout(() => setHighlightId(null), 4000);
@@ -897,7 +950,7 @@ export function ChatApp() {
       jumpPagesRef.current += 1;
       void loadOlder();
     }
-  }, [highlightId, history, thread, loadingOlder, loadOlder, virtualizer]);
+  }, [highlightId, history, messages, thread, loadingOlder, loadOlder, virtualizer]);
 
   async function signOut() {
     socketRef.current?.disconnect();
@@ -1054,17 +1107,17 @@ export function ChatApp() {
   const archivedNotice = activeChannel?.archivedAt ? `#${activeChannel.name} is archived, so it's read-only.` : null;
   // ↑ in an empty composer edits my last message there. Returns false when there is nothing to edit.
   const editLastMessage = () => {
-    const index = lastEditable(history.messages, me.id);
+    const index = lastEditable(messages, me.id);
     if (index === -1 || archivedNotice) return false;
     virtualizer.scrollToIndex(index + 1, { align: "auto" });
-    setEditRequest({ id: history.messages[index].id, where: "main" });
+    setEditRequest({ id: messages[index].id, where: "main" });
     return true;
   };
   const editLastReply = () => {
-    const messages = thread?.parent ? [thread.parent, ...thread.replies] : [];
-    const index = lastEditable(messages, me.id);
+    const threadMessages = shownThread?.parent ? [shownThread.parent, ...shownThread.replies] : [];
+    const index = lastEditable(threadMessages, me.id);
     if (index === -1 || archivedNotice) return false;
-    setEditRequest({ id: messages[index].id, where: "thread" });
+    setEditRequest({ id: threadMessages[index].id, where: "thread" });
     return true;
   };
   // Public channels can mention anyone in the workspace; DMs and private channels only their members.
@@ -1091,13 +1144,13 @@ export function ChatApp() {
       isDnd(status, now) && (status?.dndUntil ? `Notifications paused until ${untilLabel(status.dndUntil)}` : "Notifications paused")
     ].filter(Boolean).join(" · ");
   };
-  const firstUnread = unreadMarker === null ? undefined : history.messages.find(m => m.createdAt > unreadMarker && m.authorId !== me.id && !isOptimistic(m));
+  const firstUnread = unreadMarker === null ? undefined : messages.find(m => m.createdAt > unreadMarker && m.authorId !== me.id && !isOptimistic(m));
   // "Seen" goes under my newest message that the DM partner has read, unless they have written since.
   const partnerReadAt = activePartner && activePartner.id !== me.id ? activeConversation?.readCursors[activePartner.id] : undefined;
   let seenId: string | undefined;
   if (partnerReadAt) {
-    for (let i = history.messages.length - 1; i >= 0; i--) {
-      const message = history.messages[i];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
       if (message.authorId !== me.id) break;
       if (!isOptimistic(message) && message.createdAt <= partnerReadAt) { seenId = message.id; break; }
     }
@@ -1128,12 +1181,12 @@ export function ChatApp() {
           </p>
         </div>
       )}
-      {history.loaded && history.messages.length === 0 && <p className="px-2 text-sm text-zinc-400">No messages yet. Say hello below.</p>}
+      {history.loaded && messages.length === 0 && <p className="px-2 text-sm text-zinc-400">No messages yet. Say hello below.</p>}
     </>
   );
   const messageRow = (index: number) => {
-    const message = history.messages[index];
-    const previous = history.messages[index - 1];
+    const message = messages[index];
+    const previous = messages[index - 1];
     const newDay = !previous || dayLabel(previous.createdAt) !== dayLabel(message.createdAt);
     const showUnread = firstUnread?.id === message.id;
     return (
@@ -1147,7 +1200,7 @@ export function ChatApp() {
         )}
         {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
         <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
-          highlighted={highlightId === message.id} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
+          highlighted={highlightId === message.id} ops={opsForMessage.get(message.id)} onRetry={retryOp} onDismiss={dismissOp} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
           replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} onAction={onAction} openForwarded={openForwarded}
           editRequested={editRequest?.where === "main" && editRequest.id === message.id} onEditRequestHandled={clearEditRequest}/>
         {seenId === message.id && (
@@ -1378,14 +1431,14 @@ export function ChatApp() {
       </section>
 
       {rightPanel && <button aria-label="Close panel" onClick={() => setRightPanel(null)} className="absolute inset-0 z-20 bg-zinc-950/20 backdrop-blur-[1px] xl:hidden"/>}
-      {rightPanel === "thread" && thread && (
-        <ThreadPanel thread={thread} conversationName={activePartner ? activeLabel : `#${activeLabel}`} me={me} canModerate={canModerate} usersById={usersById}
-          typingText={typingText(thread.parent?.conversationId ?? activeId ?? "", thread.parentId)} highlightId={highlightId} mentionable={mentionable}
+      {rightPanel === "thread" && shownThread && (
+        <ThreadPanel thread={shownThread} ops={opsForMessage} onRetry={retryOp} onDismiss={dismissOp} conversationName={activePartner ? activeLabel : `#${activeLabel}`} me={me} canModerate={canModerate} usersById={usersById}
+          typingText={typingText(shownThread.parent?.conversationId ?? activeId ?? "", shownThread.parentId)} highlightId={highlightId} mentionable={mentionable}
           broadcastMentions={activeConversation?.type === "CHANNEL"} readOnlyNotice={archivedNotice ?? (activeChannel && !activeChannel.isMember ? `Join #${activeChannel.name} to reply.` : null)} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
-          onSend={(body, attachments) => sendMessage(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, body, attachments)}
+          onSend={(body, attachments) => sendMessage(shownThread.parent?.conversationId ?? activeId ?? "", shownThread.parentId, body, attachments)}
           onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} onAction={onAction} openForwarded={openForwarded}
           editRequestId={editRequest?.where === "thread" ? editRequest.id : null} onEditRequestHandled={clearEditRequest} onEditLast={editLastReply}
-          onCommand={(name, args) => runCommand(thread.parent?.conversationId ?? activeId ?? "", thread.parentId, name, args)}/>
+          onCommand={(name, args) => runCommand(shownThread.parent?.conversationId ?? activeId ?? "", shownThread.parentId, name, args)}/>
       )}
       {rightPanel === "activity" && (
         <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>

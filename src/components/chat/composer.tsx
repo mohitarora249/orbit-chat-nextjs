@@ -243,7 +243,8 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     setPicked([]);
     setTyping(false);
     // Cleared now rather than after the usual delay, so a reload right after sending does not bring it back.
-    // A failed send puts the text back below, and that is saved again.
+    // A message that fails to send stays in the list with a retry; the text only comes back here if it was
+    // never shown there (see below), and that is saved again.
     saveDraft("");
     const ok = await onSend(body, ready);
     if (!ok) {

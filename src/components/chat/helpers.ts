@@ -35,6 +35,12 @@ export function upsertMessage(list: ChatMessage[], message: ChatMessage) {
   return [...mergeMessages(rest.filter(item => !isOptimistic(item)), [message]), ...rest.filter(isOptimistic)];
 }
 
+// A freshly loaded list, plus my messages from `current` that the server doesn't have yet (still sending or failed).
+export function keepUnsent(fresh: ChatMessage[], current: ChatMessage[]) {
+  const sent = new Set(fresh.map(message => message.clientMessageId));
+  return [...fresh, ...current.filter(message => isOptimistic(message) && !sent.has(message.clientMessageId))];
+}
+
 export function isGrouped(message: ChatMessage, previous: ChatMessage | undefined) {
   return Boolean(previous && !previous.deletedAt && previous.authorId === message.authorId
     && dayLabel(previous.createdAt) === dayLabel(message.createdAt)

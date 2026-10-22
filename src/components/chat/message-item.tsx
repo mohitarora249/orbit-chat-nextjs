@@ -6,6 +6,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { PollCard } from "@/components/chat/poll";
 import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
+import type { MessageOp } from "@/components/chat/pending";
 import { isGifUrl, parseLinks } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets, parseMentions } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
@@ -15,8 +16,11 @@ const INLINE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "ima
 
 export type MessageActions = {
   onReact: (message: ChatMessage, emoji: string, add: boolean) => void;
-  onEdit: (message: ChatMessage, body: string) => Promise<void>;
+  onEdit: (message: ChatMessage, body: string) => void;
   onDelete: (message: ChatMessage) => void;
+  // Sends a failed change again, or gives up on it (discarding an unsent message, undoing an unsaved edit).
+  onRetry: (op: MessageOp) => void;
+  onDismiss: (op: MessageOp) => void;
   onOpenThread?: (message: ChatMessage) => void;
   onForward: (message: ChatMessage) => void;
   // Votes in or closes a poll.
@@ -28,7 +32,9 @@ export type MessageActions = {
 };
 
 type Props = MessageActions & {
+  // Shown with its unconfirmed changes applied; `ops` lists them, so failures can be shown and retried.
   message: ChatMessage;
+  ops?: MessageOp[];
   grouped: boolean;
   me: ChatUser;
   canModerate: boolean;
@@ -174,12 +180,39 @@ export function ForwardedCard({ forward, usersById, me, onOpen }: { forward: Cha
   );
 }
 
-function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, editRequested, onReact, onEdit, onDelete, onOpenThread, onForward, onAction, openForwarded, onEditRequestHandled }: Props) {
+const failureLabels: Record<MessageOp["kind"], { what: (op: MessageOp) => string; dismiss: string }> = {
+  send: { what: () => "Not sent", dismiss: "Delete" },
+  edit: { what: () => "Edit not saved", dismiss: "Undo edit" },
+  delete: { what: () => "Couldn't delete", dismiss: "Dismiss" },
+  vote: { what: () => "Vote not saved", dismiss: "Dismiss" },
+  react: { what: op => op.kind === "react" ? `Couldn't ${op.add ? "add" : "remove"} ${op.emoji}` : "", dismiss: "Dismiss" }
+};
+
+function FailedOps({ ops, onRetry, onDismiss }: { ops: MessageOp[]; onRetry: (op: MessageOp) => void; onDismiss: (op: MessageOp) => void }) {
+  return (
+    <div role="alert" className="mt-1 space-y-0.5">
+      {ops.map(op => (
+        <p key={op.key} className="flex flex-wrap items-center gap-x-1.5 text-[11px] leading-5 text-rose-600">
+          <AlertTriangle size={12} className="shrink-0"/>
+          <span className="font-medium">{failureLabels[op.kind].what(op)}.</span>
+          {op.error && <span className="text-zinc-500">{op.error}</span>}
+          <button onClick={() => onRetry(op)} className="font-semibold underline-offset-2 transition hover:underline">Retry</button>
+          <span aria-hidden className="text-zinc-300">·</span>
+          <button onClick={() => onDismiss(op)} className="font-medium text-zinc-500 underline-offset-2 transition hover:text-zinc-700 hover:underline">{failureLabels[op.kind].dismiss}</button>
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function MessageItemImpl({ message, ops, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, editRequested, onReact, onEdit, onDelete, onRetry, onDismiss, onOpenThread, onForward, onAction, openForwarded, onEditRequestHandled }: Props) {
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
-  const [saving, setSaving] = useState(false);
   const [picker, setPicker] = useState(false);
   const pending = isOptimistic(message);
+  const failed = ops?.filter(op => op.status === "failed") ?? [];
+  const savingEdit = ops?.some(op => op.kind === "edit" && op.status === "pending");
+  const pendingEmoji = new Set(ops?.flatMap(op => op.kind === "react" && op.status === "pending" ? [op.emoji] : []));
   const deleted = Boolean(message.deletedAt);
   const mine = message.authorId === me.id;
   const mentioned = !mine && !deleted && mentionsMe(message.body, me.id) !== null;
@@ -211,22 +244,17 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
     rootRef.current?.scrollIntoView({ block: "nearest" });
   }, [editRequested]); // eslint-disable-line react-hooks/exhaustive-deps -- only a new request starts an edit
 
-  async function saveEdit() {
+  function saveEdit() {
     const alreadyMentioned = parseMentions(message.body).flatMap(part => typeof part !== "string" && part.kind === "user" && usersById.has(part.userId) ? [usersById.get(part.userId)!] : []);
     const body = encodeMentions(editDraft.trim(), mentionTargets([...alreadyMentioned, ...usersById.values()], true));
-    if (body === message.body) { stopEdit(); return; }
-    setSaving(true);
-    try {
-      await onEdit(message, body);
-      stopEdit();
-    } finally {
-      setSaving(false);
-    }
+    // Shows at once; a failed save keeps the new text with a retry below the message.
+    if (body !== message.body) onEdit(message, body);
+    stopEdit();
   }
 
   function onEditKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Escape") { event.preventDefault(); stopEdit(); }
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void saveEdit(); }
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); saveEdit(); }
   }
 
   const reactionNames = (userIds: string[]) => userIds.map(id => id === me.id ? "You" : usersById.get(id)?.displayName ?? "Someone").join(", ");
@@ -254,7 +282,7 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
             <div className="mt-1 flex items-center justify-end gap-2 text-[11px]">
               <span className="mr-auto text-zinc-400">Esc to cancel · Enter to save</span>
               <button onClick={stopEdit} className="rounded-md px-2 py-1 font-medium text-zinc-500 transition hover:bg-zinc-100">Cancel</button>
-              <button onClick={() => void saveEdit()} disabled={saving} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-zinc-50 transition hover:bg-zinc-800 disabled:opacity-50">{saving ? "Saving…" : "Save"}</button>
+              <button onClick={saveEdit} className="rounded-md bg-zinc-900 px-2.5 py-1 font-medium text-zinc-50 transition hover:bg-zinc-800">Save</button>
             </div>
           </div>
         ) : isGifUrl(message.body) ? (
@@ -263,7 +291,9 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
           message.body && (
             <p className={cn("whitespace-pre-wrap break-words text-sm leading-6 transition-colors", pending ? "text-zinc-400" : "text-zinc-800")}>
               <MessageBody body={message.body} usersById={usersById} meId={me.id}/>
-              {message.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(message.editedAt)} at ${timeLabel(message.editedAt)}`}>(edited)</span>}
+              {savingEdit
+                ? <span className="ml-1 text-[11px] text-zinc-400">(saving…)</span>
+                : message.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(message.editedAt)} at ${timeLabel(message.editedAt)}`}>(edited)</span>}
             </p>
           )
         )}
@@ -290,13 +320,14 @@ function MessageItemImpl({ message, grouped, me, canModerate, usersById, highlig
               const reacted = reaction.userIds.includes(me.id);
               return (
                 <button key={reaction.emoji} disabled={readOnly} onClick={() => onReact(message, reaction.emoji, !reacted)} title={`${reactionNames(reaction.userIds)} reacted with ${reaction.emoji}`}
-                  className={cn("flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs transition active:scale-95", reacted ? "border-brand-200 bg-brand-50 text-brand-700" : "border-zinc-200 bg-card text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50")}>
+                  className={cn("flex h-6 items-center gap-1 rounded-md border px-1.5 text-xs transition active:scale-95", pendingEmoji.has(reaction.emoji) && "opacity-60", reacted ? "border-brand-200 bg-brand-50 text-brand-700" : "border-zinc-200 bg-card text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50")}>
                   <span>{reaction.emoji}</span><span className="font-medium tabular-nums">{reaction.userIds.length}</span>
                 </button>
               );
             })}
           </div>
         )}
+        {failed.length > 0 && !editing && <FailedOps ops={failed} onRetry={onRetry} onDismiss={onDismiss}/>}
         {onOpenThread && (message.replyCount > 0 || replyTyping) && (
           <button onClick={() => onOpenThread(message)} className="-ml-1.5 mt-1 flex items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-brand-600 transition hover:bg-card hover:ring-1 hover:ring-zinc-200">
             <MessageSquareText size={14}/>{message.replyCount > 0 ? `${message.replyCount} ${message.replyCount === 1 ? "reply" : "replies"}` : "Thread"}

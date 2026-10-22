@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Composer, type ComposerProps } from "@/components/chat/composer";
 import { MessageItem, type MessageActions } from "@/components/chat/message-item";
 import { dayLabel, isGrouped, timeLabel } from "@/components/chat/helpers";
+import type { MessageOp } from "@/components/chat/pending";
 import { api } from "@/lib/api";
 import { mentionsToText } from "@/lib/mentions";
 import { customStatus, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
@@ -29,6 +30,8 @@ export type ThreadState = { parentId: string; parent: ChatMessage | null; replie
 
 type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   thread: ThreadState;
+  // Unconfirmed or failed changes, by message id.
+  ops: Map<string, MessageOp[]>;
   conversationName: string;
   me: ChatUser;
   canModerate: boolean;
@@ -50,7 +53,7 @@ type ThreadPanelProps = Omit<MessageActions, "onOpenThread"> & {
   onCommand: ComposerProps["onCommand"];
 };
 
-export function ThreadPanel({ thread, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, broadcastMentions, readOnlyNotice, onClose, onLoadMore, onSend, onTyping, onNotice, editRequestId, onEditLast, onCommand, ...actions }: ThreadPanelProps) {
+export function ThreadPanel({ thread, ops, conversationName, me, canModerate, usersById, typingText, highlightId, mentionable, broadcastMentions, readOnlyNotice, onClose, onLoadMore, onSend, onTyping, onNotice, editRequestId, onEditLast, onCommand, ...actions }: ThreadPanelProps) {
   const { parent, replies } = thread;
   return (
     <PanelShell title="Thread" subtitle={conversationName} onClose={onClose}>
@@ -59,12 +62,12 @@ export function ThreadPanel({ thread, conversationName, me, canModerate, usersBy
           <div className="flex justify-center py-10 text-zinc-400"><Loader2 className="animate-spin" size={20}/></div>
         ) : parent && (
           <>
-            <MessageItem message={parent} grouped={false} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === parent.id} readOnly={Boolean(readOnlyNotice)} editRequested={editRequestId === parent.id} {...actions}/>
+            <MessageItem message={parent} grouped={false} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === parent.id} ops={ops.get(parent.id)} readOnly={Boolean(readOnlyNotice)} editRequested={editRequestId === parent.id} {...actions}/>
             <div className="my-3 flex items-center gap-3 px-2 text-[11px] font-medium text-zinc-400">
               {parent.replyCount} {parent.replyCount === 1 ? "reply" : "replies"}<div className="h-px flex-1 bg-zinc-200"/>
             </div>
             {replies.map((reply, index) => (
-              <MessageItem key={reply.id} message={reply} grouped={isGrouped(reply, replies[index - 1])} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === reply.id} readOnly={Boolean(readOnlyNotice)} editRequested={editRequestId === reply.id} {...actions}/>
+              <MessageItem key={reply.id} message={reply} grouped={isGrouped(reply, replies[index - 1])} me={me} canModerate={canModerate} usersById={usersById} highlighted={highlightId === reply.id} ops={ops.get(reply.id)} readOnly={Boolean(readOnlyNotice)} editRequested={editRequestId === reply.id} {...actions}/>
             ))}
             {thread.nextCursor && (
               <button onClick={onLoadMore} disabled={thread.loading} className="mx-auto mt-3 block rounded-md border border-zinc-200 bg-card px-3 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-50 disabled:text-zinc-400">
