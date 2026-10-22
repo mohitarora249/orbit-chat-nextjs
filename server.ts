@@ -8,7 +8,6 @@ import { prisma } from "./src/lib/prisma";
 import { auth } from "./src/lib/auth";
 import { visibleConversationsWhere } from "./src/lib/access";
 import { startOutboxWorker } from "./src/lib/outbox-worker";
-import { startReminderClock } from "./src/lib/reminders";
 import { startPollClock } from "./src/lib/polls";
 import { ensureBucket, storageConfigured } from "./src/lib/storage";
 import type { Presence } from "./src/lib/presence";
@@ -171,7 +170,6 @@ async function start() {
     await ensureBucket().catch(error => console.error("Attachment bucket unavailable; uploads will fail until storage is reachable.", error.message));
   }
   const stopWorker = startOutboxWorker(io);
-  const stopReminders = startReminderClock();
   const stopPolls = startPollClock();
 
   httpServer.listen(port, hostname, () => {
@@ -184,7 +182,6 @@ async function start() {
     shuttingDown = true;
     console.log("Shutting down...");
     stopWorker();
-    stopReminders();
     stopPolls();
     // io.close() disconnects all sockets and also closes the underlying HTTP server.
     await io.close();

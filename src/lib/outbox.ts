@@ -17,15 +17,22 @@ export type OutboxPayloads = {
   "conversation.draft": { userId: string; conversationId: string };
   // A reminder was set, went off, was snoozed or was marked done.
   "reminder.updated": { userId: string; reminderId: string };
+  // Queued for the reminder's time: fires it if it is still waiting and due (a snooze queues another).
+  "reminder.due": { reminderId: string };
+  // Queued for the send time: sends the scheduled message if it is still waiting and due.
+  "message.scheduled": { scheduledMessageId: string };
+  // One of the user's scheduled messages was scheduled, changed, sent, failed or deleted.
+  "scheduled.updated": { userId: string; scheduledMessageId: string };
   // `userId` changed their vote in the poll on `messageId` (their choices go to their own tabs only).
   "poll.voted": { userId: string; messageId: string };
 };
 export type OutboxEventType = keyof OutboxPayloads;
 
 // Must be called with the transaction client that writes the change itself, so the event exists if and
-// only if the change committed.
-export function enqueue<T extends OutboxEventType>(tx: Prisma.TransactionClient, type: T, payload: OutboxPayloads[T]) {
-  return tx.outboxEvent.create({ data: { type, payload, availableAt: new Date() } });
+// only if the change committed. An `availableAt` in the future delays the event until then, which is how
+// reminders and scheduled messages are timed.
+export function enqueue<T extends OutboxEventType>(tx: Prisma.TransactionClient, type: T, payload: OutboxPayloads[T], availableAt = new Date()) {
+  return tx.outboxEvent.create({ data: { type, payload, availableAt } });
 }
 
 // Route handlers run in the same process as the worker (see server.ts), so they can wake it right after a

@@ -3,11 +3,11 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { accessErrors, assertNotArchived, getConversationAccess, requireMessageAccess } from "@/lib/access";
-import { cursorWhere, decodeCursor, encodeCursor, messageSelect, parseLimit, serializeMessage, syncMessageLinks } from "@/lib/messages";
+import { cursorWhere, decodeCursor, encodeCursor, insertMessage, messageSelect, parseLimit, serializeMessage } from "@/lib/messages";
 import { createPoll, pollInputSchema, withMyVotes } from "@/lib/polls";
 import { POLL_QUESTION_MAX } from "@/lib/commands";
 import { requireUser } from "@/lib/session";
-import { enqueue, notifyOutbox } from "@/lib/outbox";
+import { notifyOutbox } from "@/lib/outbox";
 import { HttpError, jsonError, parseJson, routeError } from "@/lib/http";
 import type { MessagePage } from "@/lib/types";
 
@@ -131,16 +131,7 @@ export async function POST(request: NextRequest, context: Context) {
 
     try {
       const messageId = await prisma.$transaction(async tx => {
-        if (parentId) {
-          const parent = await tx.message.findUnique({ where: { id: parentId }, select: { conversationId: true, parentId: true, deletedAt: true } });
-          if (!parent || parent.conversationId !== conversationId) throw new HttpError(404, "Thread not found.");
-          if (parent.parentId) throw new HttpError(400, "Replies cannot have their own threads.");
-          if (parent.deletedAt) throw new HttpError(409, "That message was deleted.");
-        }
-        const message = await tx.message.create({
-          data: { conversationId, authorId: user.id, clientMessageId, body, parentId, forwardedFromId },
-          select: { id: true, createdAt: true }
-        });
+        const message = await insertMessage(tx, { conversationId, authorId: user.id, clientMessageId, body, parentId, forwardedFromId });
         if (attachmentIds.length) {
           // Only the uploader's own, finished, not-yet-used uploads for this conversation can be attached.
           const linked = await tx.attachment.updateMany({
@@ -149,12 +140,7 @@ export async function POST(request: NextRequest, context: Context) {
           });
           if (linked.count !== new Set(attachmentIds).size) throw new HttpError(400, "One or more attachments are not available.");
         }
-        if (parentId) {
-          await tx.message.update({ where: { id: parentId }, data: { replyCount: { increment: 1 }, lastReplyAt: message.createdAt } });
-        }
         if (poll) await createPoll(tx, message.id, poll);
-        await enqueue(tx, "message.created", { messageId: message.id });
-        await syncMessageLinks(tx, message.id, body);
         return message.id;
       });
       notifyOutbox();

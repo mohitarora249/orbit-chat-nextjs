@@ -4,14 +4,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { io, Socket } from "socket.io-client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  AlarmClock, Archive, AtSign, Bell, CheckCheck, ChevronDown, Compass, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
+  AlarmClock, Archive, AtSign, Bell, CalendarClock, CheckCheck, ChevronDown, Compass, Hash, HelpCircle, Loader2, Lock, LogOut, Menu, Pencil, Pin, Plus, Search, Users, X
 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Logo } from "@/components/ui/logo";
 import { Button } from "@/components/ui/button";
 import { Composer } from "@/components/chat/composer";
 import { MessageItem } from "@/components/chat/message-item";
-import { ActivityPanel, PeoplePanel, RemindersPanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
+import { ActivityPanel, PeoplePanel, ReminderSubject, RemindersPanel, ScheduledPanel, ThreadPanel, type ThreadState } from "@/components/chat/panels";
 import { CommandPalette, CreateChannelDialog, CreatePollDialog, ForwardDialog, HelpDialog, NotificationsMenu, WorkspaceMenu, type ForwardTarget, type NotificationPrefs, type PollDraft } from "@/components/chat/dialogs";
 import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
 import { BrowseChannelsDialog, ChannelDetailsDialog, channelPermissions, type ChannelTab } from "@/components/chat/channels";
@@ -26,11 +26,11 @@ import { encodeMentions, mentionsMe, mentionsToText, mentionTargets } from "@/li
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
 import { cn } from "@/lib/utils";
-import type { ActivityItem, Bootstrap, ChannelMember, ChatAttachment, ChatForward, ChatMessage, ChatReminder, ChatUser, ConversationDetails, ConversationSummary, Draft, MessageAction, MessagePage, SearchHit } from "@/lib/types";
+import type { ActivityItem, Bootstrap, ChannelMember, ChatAttachment, ChatForward, ChatMessage, ChatReminder, ChatScheduledMessage, ChatUser, ConversationDetails, ConversationSummary, Draft, MessageAction, MessagePage, SearchHit } from "@/lib/types";
 
 type History = { messages: ChatMessage[]; nextCursor: string | null; loaded: boolean };
 type TypingState = Record<string, Record<string, { name: string; until: number }>>;
-type RightPanel = "thread" | "activity" | "people" | "reminders" | null;
+type RightPanel = "thread" | "activity" | "people" | "reminders" | "scheduled" | null;
 type MentionToast = { message: ChatMessage; kind: NonNullable<ReturnType<typeof mentionsMe>>; where: string };
 // A message ↑ asked to edit, in the main list or the open thread (a thread's parent is in both).
 type EditRequest = { id: string; where: "main" | "thread" };
@@ -51,6 +51,12 @@ const typingKey = (conversationId: string, parentId?: string | null) => `${conve
 function upsertReminder(list: ChatReminder[], reminderId: string, reminder: ChatReminder | null) {
   const rest = list.filter(item => item.id !== reminderId);
   return reminder ? [...rest, reminder].sort((a, b) => a.remindAt.localeCompare(b.remindAt) || a.id.localeCompare(b.id)) : rest;
+}
+
+// Like upsertReminder, for scheduled messages (null once sent or deleted).
+function upsertScheduled(list: ChatScheduledMessage[], scheduledMessageId: string, scheduled: ChatScheduledMessage | null) {
+  const rest = list.filter(item => item.id !== scheduledMessageId);
+  return scheduled ? [...rest, scheduled].sort((a, b) => a.sendAt.localeCompare(b.sendAt) || a.id.localeCompare(b.id)) : rest;
 }
 
 // The newest of my messages that ↑ can edit: not pending, deleted or a GIF.
@@ -111,6 +117,8 @@ export function ChatApp() {
   const [editRequest, setEditRequest] = useState<EditRequest | null>(null);
   // My reminders that are not done: gone off (firedAt set) or waiting, soonest first.
   const [reminders, setReminders] = useState<ChatReminder[]>([]);
+  // My messages waiting to be sent, or that failed to send, soonest first.
+  const [scheduled, setScheduled] = useState<ChatScheduledMessage[]>([]);
   // Sends, reactions, edits and deletes shown before the server confirms them, or that failed (see pending.ts).
   const [ops, setOps] = useState<PendingOps>({});
 
@@ -133,6 +141,7 @@ export function ChatApp() {
   // A dialog or menu is open: it handles Esc and arrow keys itself.
   const overlayOpenRef = useRef(false);
   const remindersRef = useRef(reminders);
+  const scheduledRef = useRef(scheduled);
   const opsRef = useRef(ops);
   const opSeqRef = useRef(0);
   // Sends go out one at a time, so messages arrive in the order they were written.
@@ -140,6 +149,7 @@ export function ChatApp() {
   bootstrapRef.current = bootstrap;
   opsRef.current = ops;
   remindersRef.current = reminders;
+  scheduledRef.current = scheduled;
   overlayOpenRef.current = dialog !== null || menu !== null || forwarding !== null || pollDraft !== null;
   prefsRef.current = prefs;
   idleRef.current = idle;
@@ -189,6 +199,7 @@ export function ChatApp() {
       setPinnedIds(data.pinnedConversationIds);
       setDrafts(data.drafts);
       setReminders(data.reminders);
+      setScheduled(data.scheduledMessages);
       setPrefs(readPrefs(data.me.id));
       let last: string | null = null;
       try { last = localStorage.getItem(`orbit-chat-last:${data.me.id}`); } catch { /* storage unavailable */ }
@@ -443,7 +454,8 @@ export function ChatApp() {
     if (!state || isDnd(state.statuses[state.me.id])) return;
     if (current.sound) playSound("mention");
     if (!current.desktop || typeof Notification === "undefined" || Notification.permission !== "granted" || document.visibilityState === "visible") return;
-    const notification = new Notification("Reminder", { body: reminder.text, tag: `reminder-${reminder.id}` });
+    const about = reminder.message && !reminder.message.deleted ? mentionsToText(reminder.message.body, id => state.users.find(user => user.id === id)?.displayName) : "";
+    const notification = new Notification("Reminder", { body: reminder.text || about || "About a message", tag: `reminder-${reminder.id}` });
     notification.onclick = () => {
       window.focus();
       notification.close();
@@ -620,6 +632,7 @@ export function ChatApp() {
         // Changes that never reached the server go out again now that it is back.
         replayOffline();
         api<{ reminders: ChatReminder[] }>("/api/reminders").then(data => setReminders(data.reminders)).catch(() => undefined);
+        api<{ scheduledMessages: ChatScheduledMessage[] }>("/api/scheduled-messages").then(data => setScheduled(data.scheduledMessages)).catch(() => undefined);
         const conversationId = activeIdRef.current;
         if (conversationId) void loadMessages(conversationId, { catchUp: true });
         const parentId = threadIdRef.current;
@@ -674,6 +687,12 @@ export function ChatApp() {
       const justFired = Boolean(reminder?.firedAt) && !remindersRef.current.find(item => item.id === reminderId)?.firedAt;
       setReminders(current => upsertReminder(current, reminderId, reminder));
       if (justFired && reminder) alertReminder(reminder);
+    });
+    // A scheduled message was scheduled, changed, sent (null), failed or deleted (null), here or in another tab.
+    socket.on("scheduled:update", ({ scheduledMessageId, scheduledMessage }: { scheduledMessageId: string; scheduledMessage: ChatScheduledMessage | null }) => {
+      const before = scheduledRef.current.find(item => item.id === scheduledMessageId);
+      if (scheduledMessage?.failedAt && before && !before.failedAt) setNotice(`A scheduled message wasn't sent: ${scheduledMessage.failReason ?? "something went wrong."} It's in Scheduled.`);
+      setScheduled(current => upsertScheduled(current, scheduledMessageId, scheduledMessage));
     });
     // Our vote changed in another tab. Anonymous polls only tell each voter their own choices this way.
     socket.on("poll:votes", ({ messageId, optionIds }: { messageId: string; pollId: string; optionIds: string[] }) => setMyVotes(messageId, optionIds));
@@ -791,6 +810,64 @@ export function ChatApp() {
       setNotice(error instanceof Error ? error.message : "Could not update the poll.");
     }
   }, [applyUpdated, runOp]);
+
+  // "Remind me about this" on a message.
+  const onRemind = useCallback(async (message: ChatMessage, at: Date) => {
+    try {
+      const { reminder } = await api<{ reminder: ChatReminder }>("/api/reminders", { method: "POST", json: { messageId: message.id, remindAt: at.toISOString() } });
+      setReminders(current => upsertReminder(current, reminder.id, reminder));
+      setNotice(`I'll remind you about this message ${reminderTimeLabel(at)}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not set the reminder.");
+    }
+  }, []);
+
+  // The schedule button in a composer. Resolves true once scheduled, which clears the composer.
+  const scheduleMessage = useCallback(async (conversationId: string, parentId: string | null, body: string, at: Date) => {
+    try {
+      const { scheduledMessage } = await api<{ scheduledMessage: ChatScheduledMessage }>("/api/scheduled-messages", { method: "POST", json: { conversationId, parentId: parentId ?? undefined, body, sendAt: at.toISOString() } });
+      setScheduled(current => upsertScheduled(current, scheduledMessage.id, scheduledMessage));
+      setNotice(`Message scheduled to send ${reminderTimeLabel(at)}. Find it under Scheduled.`);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not schedule the message.");
+      return false;
+    }
+  }, []);
+
+  // Send now, reschedule, edit (`text` shows names; encoded here) or delete a scheduled message. Shown at once
+  // and put back on failure. A message sent meanwhile is gone from the list once its update arrives.
+  async function changeScheduled(item: ChatScheduledMessage, change: { sendNow: true } | { sendAt: Date } | { text: string } | { delete: true }) {
+    const state = bootstrapRef.current;
+    if (!state) return;
+    let json: Record<string, unknown> | null = null;
+    let shown: ChatScheduledMessage | null = null;
+    if ("delete" in change) shown = null;
+    else if ("text" in change) {
+      const mentioned = state.users.filter(user => item.body.includes(`<@${user.id}>`));
+      const isChannel = state.conversations.find(c => c.id === item.conversationId)?.type === "CHANNEL";
+      const body = encodeMentions(change.text, mentionTargets([...mentioned, ...state.users], isChannel));
+      json = { body };
+      shown = { ...item, body };
+    } else {
+      const sendAt = "sendAt" in change ? change.sendAt : new Date();
+      json = "sendAt" in change ? { sendAt: sendAt.toISOString() } : { sendNow: true };
+      shown = { ...item, sendAt: sendAt.toISOString(), failedAt: null, failReason: null };
+    }
+    setScheduled(current => upsertScheduled(current, item.id, shown));
+    try {
+      if (json) {
+        const { scheduledMessage } = await api<{ scheduledMessage: ChatScheduledMessage }>(`/api/scheduled-messages/${item.id}`, { method: "PATCH", json });
+        setScheduled(current => current.some(other => other.id === item.id) ? upsertScheduled(current, item.id, scheduledMessage) : current);
+        if ("sendAt" in change) setNotice(`Message rescheduled to send ${reminderTimeLabel(change.sendAt)}.`);
+      } else {
+        await api(`/api/scheduled-messages/${item.id}`, { method: "DELETE" });
+      }
+    } catch (error) {
+      setScheduled(current => upsertScheduled(current, item.id, item));
+      setNotice(error instanceof Error ? error.message : "Could not update the scheduled message.");
+    }
+  }
 
   // Posts the poll from the /poll dialog. Throws so the dialog can show what went wrong.
   async function sendPoll(draft: PollDraft) {
@@ -1115,6 +1192,7 @@ export function ChatApp() {
 
   // Unread mentions show in the tab title so they are noticed from other tabs too.
   const overdueReminders = reminders.filter(reminder => reminder.firedAt);
+  const failedScheduled = scheduled.filter(item => item.failedAt);
   const totalMentions = bootstrap?.conversations.reduce((sum, c) => sum + (inSidebar(c) ? c.mentionCount : 0), 0) ?? 0;
   useEffect(() => {
     document.title = totalMentions > 0 ? `(@${totalMentions}) Orbit Chat` : "Orbit Chat";
@@ -1146,6 +1224,9 @@ export function ChatApp() {
   const activeChannel = activeConversation?.type === "CHANNEL" ? activeConversation : null;
   const activePermissions = activeChannel ? channelPermissions(activeChannel, me.id, canModerate) : null;
   const archivedNotice = activeChannel?.archivedAt ? `#${activeChannel.name} is archived, so it's read-only.` : null;
+  // My messages waiting to be posted in the open conversation itself (not in its threads).
+  const activeScheduled = scheduled.filter(item => item.conversationId === activeId && !item.parentId && !item.failedAt);
+  const conversationTitle = (id: string) => { const c = bootstrap.conversations.find(item => item.id === id); return c ? c.type === "CHANNEL" ? `#${label(c)}` : label(c) : null; };
   // ↑ in an empty composer edits my last message there. Returns false when there is nothing to edit.
   const editLastMessage = () => {
     const index = lastEditable(messages, me.id);
@@ -1242,7 +1323,7 @@ export function ChatApp() {
         {showUnread && <div className="my-2 flex items-center gap-3"><div className="h-px flex-1 bg-brand-200"/><span className="text-[11px] font-medium text-brand-600">New messages</span></div>}
         <MessageItem message={message} grouped={!newDay && !showUnread && isGrouped(message, previous)} me={me} canModerate={canModerate} usersById={usersById}
           highlighted={highlightId === message.id} ops={opsForMessage.get(message.id)} onRetry={retryOp} onDismiss={dismissOp} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onOpenThread={onOpenThread}
-          replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} onAction={onAction} openForwarded={openForwarded}
+          replyTyping={typingText(message.conversationId, message.id, "replying")} readOnly={Boolean(archivedNotice)} onForward={onForward} onAction={onAction} onRemind={onRemind} openForwarded={openForwarded}
           editRequested={editRequest?.where === "main" && editRequest.id === message.id} onEditRequestHandled={clearEditRequest}/>
         {seenId === message.id && (
           <p title={`${activeLabel} has seen this`} className="flex items-center justify-end gap-1 px-2 pt-0.5 text-[11px] text-zinc-400"><CheckCheck size={13} className="text-brand-500"/>Seen</p>
@@ -1329,6 +1410,14 @@ export function ChatApp() {
               <AlarmClock size={15} className={overdueReminders.length > 0 ? "text-brand-600" : "text-zinc-400"}/>Reminders
               {overdueReminders.length > 0 && <span title={`${overdueReminders.length} overdue`} className="ml-auto min-w-[20px] rounded-md bg-brand-600 px-1.5 py-px text-center text-[11px] font-semibold tabular-nums text-white">{countLabel(overdueReminders.length)}</span>}
             </button>
+            {(scheduled.length > 0 || rightPanel === "scheduled") && (
+              <button onClick={() => setRightPanel(current => current === "scheduled" ? null : "scheduled")} aria-pressed={rightPanel === "scheduled"} className={navItem(rightPanel === "scheduled", failedScheduled.length > 0)}>
+                <CalendarClock size={15} className={failedScheduled.length > 0 ? "text-rose-600" : "text-zinc-400"}/>Scheduled
+                {failedScheduled.length > 0
+                  ? <span title={`${failedScheduled.length} not sent`} className="ml-auto min-w-[20px] rounded-md bg-rose-600 px-1.5 py-px text-center text-[11px] font-semibold tabular-nums text-white">{countLabel(failedScheduled.length)}</span>
+                  : <span className="ml-auto text-[11px] tabular-nums text-zinc-400">{countLabel(scheduled.length)}</span>}
+              </button>
+            )}
           </nav>
         </div>
 
@@ -1449,6 +1538,13 @@ export function ChatApp() {
 
         <div className="px-3 pb-2 sm:px-5 sm:pb-3">
           <div className="mx-auto max-w-3xl">
+            {activeScheduled.length > 0 && (
+              <button onClick={() => setRightPanel("scheduled")} className="mb-1.5 flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800">
+                <CalendarClock size={12} className="text-zinc-400"/>
+                {activeScheduled.length === 1 ? `1 message scheduled to send ${reminderTimeLabel(new Date(activeScheduled[0].sendAt))}` : `${activeScheduled.length} messages scheduled here`}
+                <span className="font-medium text-brand-600">View</span>
+              </button>
+            )}
             {activeChannel?.archivedAt ? (
               <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50 px-4 py-3 text-[13px] text-zinc-600">
                 <Archive size={15} className="text-zinc-400"/>You&apos;re viewing an archived channel. It&apos;s read-only.
@@ -1465,6 +1561,7 @@ export function ChatApp() {
                 typingText={typingText(activeConversation.id)} autoFocus mentionable={mentionable} broadcastMentions={activeConversation.type === "CHANNEL"} onTyping={emitTyping} onNotice={setNotice}
                 savedDraft={drafts[activeConversation.id]?.body} onDraftChange={body => saveDraft(activeConversation.id, body)}
                 onSend={(body, attachments) => sendMessage(activeConversation.id, null, body, attachments)}
+                onSchedule={(body, at) => scheduleMessage(activeConversation.id, null, body, at)}
                 onEditLast={editLastMessage} onCommand={(name, args) => runCommand(activeConversation.id, null, name, args)}/>
             )}
           </div>
@@ -1477,7 +1574,8 @@ export function ChatApp() {
           typingText={typingText(shownThread.parent?.conversationId ?? activeId ?? "", shownThread.parentId)} highlightId={highlightId} mentionable={mentionable}
           broadcastMentions={activeConversation?.type === "CHANNEL"} readOnlyNotice={archivedNotice ?? (activeChannel && !activeChannel.isMember ? `Join #${activeChannel.name} to reply.` : null)} onClose={() => { setRightPanel(null); setThread(null); }} onLoadMore={() => void loadMoreReplies()}
           onSend={(body, attachments) => sendMessage(shownThread.parent?.conversationId ?? activeId ?? "", shownThread.parentId, body, attachments)}
-          onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} onAction={onAction} openForwarded={openForwarded}
+          onSchedule={(body, at) => scheduleMessage(shownThread.parent?.conversationId ?? activeId ?? "", shownThread.parentId, body, at)}
+          onTyping={emitTyping} onNotice={setNotice} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onForward={onForward} onAction={onAction} onRemind={onRemind} openForwarded={openForwarded}
           editRequestId={editRequest?.where === "thread" ? editRequest.id : null} onEditRequestHandled={clearEditRequest} onEditLast={editLastReply}
           onCommand={(name, args) => runCommand(shownThread.parent?.conversationId ?? activeId ?? "", shownThread.parentId, name, args)}/>
       )}
@@ -1485,10 +1583,17 @@ export function ChatApp() {
         <ActivityPanel usersById={usersById} conversationName={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? label(c) : "conversation"; }} onOpen={openActivity} onClose={() => setRightPanel(null)}/>
       )}
       {rightPanel === "reminders" && (
-        <RemindersPanel reminders={reminders} now={now} onClose={() => setRightPanel(null)}
-          sourceLabel={id => { const c = bootstrap.conversations.find(item => item.id === id); return c ? c.type === "CHANNEL" ? `#${label(c)}` : label(c) : null; }}
+        <RemindersPanel reminders={reminders} now={now} usersById={usersById} onClose={() => setRightPanel(null)}
+          sourceLabel={conversationTitle}
           onOpenSource={id => { setRightPanel(null); openConversation(id); }}
+          onOpenMessage={reminder => reminder.message && reminder.conversationId && jumpTo(reminder.conversationId, reminder.message.id, reminder.message.parentId)}
           onDone={reminder => void settleReminder(reminder, false)} onSnooze={reminder => void settleReminder(reminder, true)}/>
+      )}
+      {rightPanel === "scheduled" && (
+        <ScheduledPanel scheduled={scheduled} now={now} usersById={usersById} destinationLabel={conversationTitle} onClose={() => setRightPanel(null)}
+          onOpen={item => { if (item.parentId) jumpTo(item.conversationId, item.parentId, item.parentId); else { setRightPanel(null); openConversation(item.conversationId); } }}
+          onSendNow={item => void changeScheduled(item, { sendNow: true })} onReschedule={(item, at) => void changeScheduled(item, { sendAt: at })}
+          onEdit={(item, text) => void changeScheduled(item, { text })} onDelete={item => void changeScheduled(item, { delete: true })}/>
       )}
       {rightPanel === "people" && <PeoplePanel users={bootstrap.users} meId={me.id} presenceOf={presenceOf} statusOf={statusOf} now={now} onOpenDm={userId => { setRightPanel(null); void openDm(userId); }} onClose={() => setRightPanel(null)}/>}
 
@@ -1522,10 +1627,13 @@ export function ChatApp() {
                   Reminder · {dayLabel(reminder.remindAt) === "Today" ? timeLabel(reminder.remindAt) : `${dayLabel(reminder.remindAt)} at ${timeLabel(reminder.remindAt)}`}
                   {source && <> · <button onClick={() => openConversation(source.id)} className="font-medium text-brand-600 transition hover:underline">{source.type === "CHANNEL" ? `#${label(source)}` : label(source)}</button></>}
                 </p>
-                <p className="mt-0.5 whitespace-pre-wrap break-words text-[13px] leading-5 text-zinc-900">{reminder.text}</p>
-                <div className="mt-2 flex items-center gap-1.5">
+                <div className="mt-0.5"><ReminderSubject reminder={reminder} usersById={usersById}/></div>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <Button size="sm" onClick={() => void settleReminder(reminder, false)} className="h-7 px-2.5 text-xs">Mark as done</Button>
                   <Button size="sm" variant="outline" onClick={() => void settleReminder(reminder, true)} className="h-7 px-2.5 text-xs">Snooze 20 min</Button>
+                  {reminder.message && !reminder.message.deleted && reminder.conversationId && (
+                    <Button size="sm" variant="ghost" onClick={() => jumpTo(reminder.conversationId!, reminder.message!.id, reminder.message!.parentId)} className="h-7 px-2 text-xs text-brand-600">View message</Button>
+                  )}
                 </div>
               </div>
             </div>

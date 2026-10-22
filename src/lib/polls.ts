@@ -99,8 +99,8 @@ export async function reopenPoll(tx: Prisma.TransactionClient, poll: PollForActi
   await enqueue(tx, "message.updated", { messageId: poll.messageId });
 }
 
-// Closes polls whose closing time has passed and queues their update in the same transaction, like the
-// reminder clock (src/lib/reminders.ts). SKIP LOCKED lets several server instances run this.
+// Closes polls whose closing time has passed and queues their update in the same transaction. SKIP LOCKED
+// lets several server instances run this.
 async function closeDuePolls() {
   const closed = await prisma.$transaction(async tx => {
     const due = await tx.$queryRaw<{ messageId: string }[]>`

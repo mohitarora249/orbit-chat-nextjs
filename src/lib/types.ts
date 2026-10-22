@@ -141,12 +141,37 @@ export type Bootstrap = {
   drafts: Record<string, Draft>;
   // The user's reminders that are not done yet (gone off or waiting), soonest first.
   reminders: ChatReminder[];
+  // The user's messages waiting to be sent (or that failed to send), soonest first.
+  scheduledMessages: ChatScheduledMessage[];
 };
 
 export type Gif = { id: string; title: string; url: string; width: number; height: number };
 
-// A /remind reminder. `firedAt` is set once it has gone off, and cleared again by a snooze.
-export type ChatReminder = { id: string; text: string; remindAt: string; firedAt: string | null; conversationId: string | null };
+// A reminder from /remind, or about a message ("Remind me about this"). `firedAt` is set once it has gone
+// off, and cleared again by a snooze.
+export type ChatReminder = {
+  id: string;
+  // Empty for a message reminder.
+  text: string;
+  remindAt: string;
+  firedAt: string | null;
+  conversationId: string | null;
+  // The message to go back to, as it is now. Null for /remind reminders, and once the user can no longer
+  // see the conversation (or it was deleted). A deleted message has an empty body.
+  message: { id: string; parentId: string | null; authorId: string; body: string; deleted: boolean } | null;
+};
+
+// A message the user scheduled. Only its author sees it; once sent it becomes an ordinary message and this
+// goes away. `failedAt` and `failReason` are set when it could not be sent, until it is rescheduled.
+export type ChatScheduledMessage = {
+  id: string;
+  conversationId: string;
+  parentId: string | null;
+  body: string;
+  sendAt: string;
+  failedAt: string | null;
+  failReason: string | null;
+};
 
 // Mentions in `body` are <@id> tokens, as in a message.
 export type Draft = { body: string; updatedAt: string };

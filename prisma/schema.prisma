@@ -61,6 +61,7 @@ model User {
   drafts              Draft[]
   reminders           Reminder[]
   pollVotes           PollVote[]
+  scheduledMessages   ScheduledMessage[]
 }
 
 // Better Auth tables.
@@ -153,6 +154,7 @@ model Conversation {
   pinnedBy    PinnedConversation[]
   drafts      Draft[]
   reminders   Reminder[]
+  scheduled   ScheduledMessage[]
 
   @@unique([workspaceId, type, name])
 }
@@ -196,6 +198,9 @@ model Message {
   attachments     Attachment[]
   links           MessageLink[]
   poll            Poll?
+  reminders       Reminder[]
+  // Thread replies scheduled to be posted under this message.
+  scheduled       ScheduledMessage[]
 
   @@unique([authorId, clientMessageId])
   @@index([conversationId, createdAt, id])
@@ -284,16 +289,45 @@ model Reminder {
   userId         String
   // Where it was set, so the reminder can link back. Cleared if the conversation is deleted.
   conversationId String?
+  // "Remind me about this message": the message to go back to. `text` is then empty.
+  messageId      String?
   text           String
+  // A `reminder.due` outbox event becomes available at this time and fires it (see ADR-014).
   remindAt       DateTime
   firedAt        DateTime?
   createdAt      DateTime      @default(now())
   user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  message        Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
 
-  @@index([firedAt, remindAt])
   @@index([userId, firedAt])
   @@index([conversationId])
+  @@index([messageId])
+}
+
+// A message waiting to be sent at `sendAt` by a `message.scheduled` outbox event (see ADR-017). Only its
+// author can see it. Once sent it is deleted, and the message is an ordinary one.
+model ScheduledMessage {
+  id             String       @id @default(cuid())
+  authorId       String
+  conversationId String
+  // A scheduled thread reply.
+  parentId       String?
+  // Mentions as <@id> tokens, as in a message.
+  body           String
+  sendAt         DateTime
+  // Set when it could not be sent (no longer a member, channel archived, thread deleted). It then waits for
+  // its author to send it now, reschedule it or delete it.
+  failedAt       DateTime?
+  failReason     String?
+  createdAt      DateTime     @default(now())
+  author         User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  parent         Message?     @relation(fields: [parentId], references: [id], onDelete: Cascade)
+
+  @@index([authorId, sendAt])
+  @@index([conversationId])
+  @@index([parentId])
 }
 
 // Open Graph data for a URL, shared by every message that links to it. This table is the unfurl cache:

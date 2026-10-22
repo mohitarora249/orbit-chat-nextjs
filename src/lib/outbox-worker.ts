@@ -7,7 +7,8 @@ import { serializeStatus, statusSelect } from "./presence";
 import { deleteObject, openObject } from "./storage";
 import { scanFile } from "./scanner";
 import { refreshPreviews } from "./unfurl";
-import { reminderSelect, serializeReminder } from "./reminders";
+import { fireReminder, loadReminder } from "./reminders";
+import { markScheduledFailed, scheduledSelect, sendScheduledMessage, serializeScheduled } from "./scheduled";
 
 type Handlers = { [T in OutboxEventType]: (payload: OutboxPayloads[T]) => Promise<void> };
 type ClaimedEvent = { id: bigint; type: OutboxEventType; payload: unknown; attempts: number };
@@ -105,8 +106,16 @@ function createHandlers(io: Server): Handlers {
     },
     // Like drafts: sends the reminder as it is now (null once it is done), to the user's own tabs only.
     "reminder.updated": async ({ userId, reminderId }) => {
-      const reminder = await prisma.reminder.findUnique({ where: { id: reminderId }, select: reminderSelect });
-      io.to(`user:${userId}`).emit("reminder:update", { reminderId, reminder: reminder && serializeReminder(reminder) });
+      io.to(`user:${userId}`).emit("reminder:update", { reminderId, reminder: await loadReminder(userId, reminderId) });
+    },
+    // Timed events: queued with availableAt set to the reminder or send time. Each re-checks that it is still
+    // due, so the events left behind by a snooze or reschedule do nothing.
+    "reminder.due": ({ reminderId }) => fireReminder(reminderId),
+    "message.scheduled": ({ scheduledMessageId }) => sendScheduledMessage(scheduledMessageId),
+    // Like reminders: the scheduled message as it is now (null once sent or deleted), to the author's tabs only.
+    "scheduled.updated": async ({ userId, scheduledMessageId }) => {
+      const scheduled = await prisma.scheduledMessage.findUnique({ where: { id: scheduledMessageId }, select: scheduledSelect });
+      io.to(`user:${userId}`).emit("scheduled:update", { scheduledMessageId, scheduledMessage: scheduled && serializeScheduled(scheduled) });
     },
     // The user's own choices, for their other tabs: anonymous polls never carry them on the message.
     "poll.voted": async ({ userId, messageId }) => {
@@ -160,6 +169,7 @@ function coalesce(batch: ClaimedEvent[]) {
 
 // Called when an event has failed MAX_ATTEMPTS times, so the user is not left waiting forever.
 async function onGiveUp(io: Server, event: ClaimedEvent) {
+  if (event.type === "message.scheduled") return markScheduledFailed((event.payload as OutboxPayloads["message.scheduled"]).scheduledMessageId);
   if (event.type !== "attachment.scan") return;
   const { attachmentId } = event.payload as OutboxPayloads["attachment.scan"];
   const attachment = await prisma.attachment.update({ where: { id: attachmentId }, data: { status: "FAILED" } }).catch(() => null);
@@ -189,7 +199,10 @@ export function startOutboxWorker(io: Server) {
   const handlers = createHandlers(io);
   const lanes: Lane[] = [
     // Realtime fan-out is fast and ordering matters, so it runs one event at a time.
-    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.updated", "conversation.membership", "conversation.read", "user.status", "conversation.pins", "conversation.draft", "reminder.updated", "poll.voted"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
+    { name: "realtime", types: ["message.created", "message.updated", "conversation.created", "conversation.updated", "conversation.membership", "conversation.read", "user.status", "conversation.pins", "conversation.draft", "reminder.updated", "scheduled.updated", "poll.voted"], batchSize: 50, leaseSeconds: 30, concurrency: 1 },
+    // Reminders and scheduled messages coming due. Many can fall due at once (9:00 sharp), so they get their own
+    // lane rather than holding up live delivery; what they change is then announced on the realtime lane.
+    { name: "timed", types: ["reminder.due", "message.scheduled"], batchSize: 20, leaseSeconds: 60, concurrency: 4 },
     // Scans are slow; keep them off the realtime lane so they never delay message delivery.
     { name: "scan", types: ["attachment.scan"], batchSize: 4, leaseSeconds: 300, concurrency: 4 },
     // Link previews wait on other people's servers (up to 5 seconds per link), so they get their own lane too.

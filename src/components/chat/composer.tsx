@@ -1,10 +1,11 @@
 "use client";
 
 import { ClipboardEvent, DragEvent, Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { AlarmClock, ArrowUp, AtSign, BarChart3, ImagePlay, Loader2, Megaphone, Paperclip, Shuffle, Smile, X } from "lucide-react";
+import { AlarmClock, ArrowUp, AtSign, BarChart3, CalendarClock, ImagePlay, Loader2, Megaphone, Paperclip, Shuffle, Smile, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
+import { nextMondayAt9, tomorrowAt9, WhenMenu, type WhenOption } from "@/components/chat/when-menu";
 import { api } from "@/lib/api";
 import { parseCommand, SLASH_COMMANDS, type SlashCommandName } from "@/lib/commands";
 import { encodeMentions, mentionsToText, mentionTargets, parseMentions, type BroadcastMention } from "@/lib/mentions";
@@ -49,6 +50,11 @@ const suggestionGroup = (suggestion: Suggestion) => suggestion.kind === "user" ?
 // The command being typed: "/" and letters, nothing after them yet.
 const COMMAND_QUERY = /^\/([a-z]*)$/i;
 
+const SCHEDULE_OPTIONS: WhenOption[] = [
+  { label: "Tomorrow morning", at: tomorrowAt9 },
+  { label: "Next Monday morning", at: nextMondayAt9 }
+];
+
 // A /giphy search waiting to be sent, shuffled or cancelled. Only this person sees it.
 type GifPreview = { query: string; gifs: Gif[]; index: number };
 
@@ -70,6 +76,9 @@ export type ComposerProps = {
   savedDraft?: string;
   onDraftChange?: (body: string) => void;
   onSend: (body: string, attachments: ChatAttachment[]) => Promise<boolean>;
+  // Schedules the text to be sent at `at` (text only: files are sent straight away). Resolves true once
+  // scheduled, which clears the text. Without it there is no schedule button.
+  onSchedule?: (body: string, at: Date) => Promise<boolean>;
   // ↑ in an empty composer: start editing the user's last message here. Returns false if there is none.
   onEditLast?: () => boolean;
   // Runs /poll, /remind and /status; /giphy is handled here. Resolves true once done, which clears the text.
@@ -102,7 +111,7 @@ function decodeDraft(body: string, mentionable: ChatUser[]) {
   return { text: mentionsToText(body, id => byId.get(id)?.displayName, null), picked: [...new Set(picked)] };
 }
 
-export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, broadcastMentions, savedDraft = "", onDraftChange, onSend, onEditLast, onCommand, onTyping, onNotice }: ComposerProps) {
+export function Composer({ conversationId, parentId, placeholder, typingText, compact, autoFocus, mentionable, broadcastMentions, savedDraft = "", onDraftChange, onSend, onSchedule, onEditLast, onCommand, onTyping, onNotice }: ComposerProps) {
   const [initial] = useState(() => decodeDraft(savedDraft, mentionable));
   const [draft, setDraft] = useState(initial.text);
   const [uploads, setUploads] = useState<Upload[]>([]);
@@ -117,6 +126,7 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
   // The text when Esc closed the command list, so it stays closed until the text changes.
   const [dismissedCommand, setDismissedCommand] = useState<string | null>(null);
   const [gif, setGif] = useState<GifPreview | null>(null);
+  const [scheduling, setScheduling] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const listId = useId();
@@ -250,6 +260,25 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
     if (!ok) {
       setDraft(text);
       setUploads(sentUploads);
+      setPicked(sentPicked);
+    }
+    setSending(false);
+    textareaRef.current?.focus();
+  }
+
+  // Like submit, but the text goes out later. Cleared now and put back if scheduling fails.
+  async function schedule(at: Date) {
+    setScheduling(false);
+    const text = draft.trim();
+    if (!onSchedule || !text || sending) return;
+    if (onCommand && !text.startsWith("//") && parseCommand(text)) { onNotice("Commands can't be scheduled. To schedule this as a message, start it with \"//\"."); return; }
+    const body = encode(onCommand && text.startsWith("//") ? text.slice(1) : text, picked);
+    const sentPicked = picked;
+    setSending(true);
+    clearDraft();
+    const ok = await onSchedule(body, at);
+    if (!ok) {
+      setDraft(text);
       setPicked(sentPicked);
     }
     setSending(false);
@@ -497,7 +526,15 @@ export function Composer({ conversationId, parentId, placeholder, typingText, co
             {picker && <EmojiPicker className="bottom-11 left-0" onPick={insertEmoji} onClose={() => setPicker(false)}/>}
             {!compact && <span className="ml-2 hidden text-[11px] text-zinc-400 sm:inline"><kbd className="font-sans font-medium text-zinc-500">Enter</kbd> to send · <kbd className="font-sans font-medium text-zinc-500">Shift + Enter</kbd> for a new line{onCommand && <> · <kbd className="font-sans font-medium text-zinc-500">/</kbd> for commands</>}</span>}
           </div>
-          <Button type="submit" size="icon" disabled={!canSend} title={uploading ? "Uploading…" : "Send"} aria-label={sending ? "Sending" : uploading ? "Uploading" : "Send"} className="h-8 w-8 rounded-lg">{sending || uploading ? <Loader2 size={14} className="animate-spin"/> : <ArrowUp size={16}/>}</Button>
+          <div className="relative flex items-center gap-1">
+            {onSchedule && (
+              <button type="button" disabled={!canSend || uploads.length > 0} onClick={() => setScheduling(!scheduling)} aria-expanded={scheduling}
+                title={uploads.length ? "Messages with files can't be scheduled" : "Schedule message"} aria-label="Schedule message"
+                className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 disabled:pointer-events-none disabled:opacity-40"><CalendarClock size={16}/></button>
+            )}
+            {scheduling && <WhenMenu title="Schedule message" submitLabel="Schedule" options={SCHEDULE_OPTIONS} onPick={at => void schedule(at)} onClose={() => setScheduling(false)} className="bottom-11 right-0"/>}
+            <Button type="submit" size="icon" disabled={!canSend} title={uploading ? "Uploading…" : "Send"} aria-label={sending ? "Sending" : uploading ? "Uploading" : "Send"} className="h-8 w-8 rounded-lg">{sending || uploading ? <Loader2 size={14} className="animate-spin"/> : <ArrowUp size={16}/>}</Button>
+          </div>
         </div>
       </form>
       <p aria-live="polite" className="mt-1 h-4 truncate px-1 text-[11px] text-zinc-400">{typingText}</p>

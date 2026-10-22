@@ -3,31 +3,33 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { enqueue, notifyOutbox } from "@/lib/outbox";
-import { reminderSelect, reminderTimeSchema, serializeReminder } from "@/lib/reminders";
+import { futureTimeSchema, loadReminder, scheduleReminder } from "@/lib/reminders";
 import { jsonError, parseJson, routeError } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
 type Context = { params: Promise<{ reminderId: string }> };
 
-const snoozeSchema = z.object({ remindAt: reminderTimeSchema });
+const snoozeSchema = z.object({ remindAt: futureTimeSchema });
 
-// Snoozes a reminder: it goes off again at `remindAt`.
+// Snoozes a reminder: it goes off again at `remindAt`. The event queued for the old time finds it not yet
+// due (or already fired) and does nothing.
 export async function PATCH(request: NextRequest, context: Context) {
   try {
     const { user, error } = await requireUser(request);
     if (error) return error;
     const { reminderId } = await context.params;
     const { remindAt } = await parseJson(request, snoozeSchema);
-    const reminder = await prisma.$transaction(async tx => {
+    const found = await prisma.$transaction(async tx => {
       const updated = await tx.reminder.updateMany({ where: { id: reminderId, userId: user.id }, data: { remindAt: new Date(remindAt), firedAt: null } });
-      if (!updated.count) return null;
+      if (!updated.count) return false;
       await enqueue(tx, "reminder.updated", { userId: user.id, reminderId });
-      return tx.reminder.findUnique({ where: { id: reminderId }, select: reminderSelect });
+      await scheduleReminder(tx, reminderId, new Date(remindAt));
+      return true;
     });
-    if (!reminder) return jsonError("Reminder not found.", 404);
+    if (!found) return jsonError("Reminder not found.", 404);
     notifyOutbox();
-    return NextResponse.json({ reminder: serializeReminder(reminder) });
+    return NextResponse.json({ reminder: await loadReminder(user.id, reminderId) });
   } catch (error) {
     return routeError("PATCH reminder", error, "Could not snooze the reminder.");
   }

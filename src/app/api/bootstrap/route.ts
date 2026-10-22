@@ -6,6 +6,7 @@ import { listConversations, listDrafts, listPinnedConversationIds } from "@/lib/
 import { jsonError, routeError } from "@/lib/http";
 import { serializeStatus, statusSelect } from "@/lib/presence";
 import { listReminders } from "@/lib/reminders";
+import { listScheduled } from "@/lib/scheduled";
 import type { Bootstrap } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +17,7 @@ export async function GET(request: NextRequest) {
     if (error) return error;
     const workspaceLink = await getPrimaryWorkspaceLink(user.id);
     if (!workspaceLink) return jsonError("You are not a member of any workspace.", 403);
-    const [members, conversations, pinnedConversationIds, drafts, reminders] = await Promise.all([
+    const [members, conversations, pinnedConversationIds, drafts, reminders, scheduledMessages] = await Promise.all([
       prisma.workspaceMember.findMany({
         where: { workspaceId: workspaceLink.workspaceId },
         orderBy: [{ user: { displayName: "asc" } }, { userId: "asc" }],
@@ -25,7 +26,8 @@ export async function GET(request: NextRequest) {
       listConversations(user.id, workspaceLink.workspaceId),
       listPinnedConversationIds(user.id, workspaceLink.workspaceId),
       listDrafts(user.id, workspaceLink.workspaceId),
-      listReminders(user.id)
+      listReminders(user.id),
+      listScheduled(user.id)
     ]);
     const body: Bootstrap = {
       me: { id: user.id, displayName: user.displayName, avatarColor: user.avatarColor, email: user.email },
@@ -38,7 +40,8 @@ export async function GET(request: NextRequest) {
       conversations,
       pinnedConversationIds,
       drafts,
-      reminders
+      reminders,
+      scheduledMessages
     };
     return NextResponse.json(body);
   } catch (error) {

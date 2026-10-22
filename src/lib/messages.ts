@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
+import { HttpError } from "./errors";
 import { extractLinks } from "./links";
 import { enqueue } from "./outbox";
 import type { ChatForward, ChatLinkPreview, ChatMessage, ChatPoll, ReactionSummary } from "./types";
@@ -148,6 +149,30 @@ export async function syncMessageLinks(tx: Prisma.TransactionClient, messageId: 
   await tx.linkPreview.createMany({ data: urls.map(url => ({ url })), skipDuplicates: true });
   await tx.messageLink.createMany({ data: urls.map((url, position) => ({ messageId, position, url })) });
   await enqueue(tx, "message.unfurl", { messageId });
+}
+
+export type NewMessage = { conversationId: string; authorId: string; clientMessageId: string; body: string; parentId?: string | null; forwardedFromId?: string };
+
+// Writes a message (checking its thread parent), updates the parent's reply count, and queues its delivery
+// and link previews. Used for sent and scheduled messages; callers add attachments or a poll in the same
+// transaction. Throws HttpError if the thread cannot take a reply.
+export async function insertMessage(tx: Prisma.TransactionClient, { conversationId, authorId, clientMessageId, body, parentId, forwardedFromId }: NewMessage) {
+  if (parentId) {
+    const parent = await tx.message.findUnique({ where: { id: parentId }, select: { conversationId: true, parentId: true, deletedAt: true } });
+    if (!parent || parent.conversationId !== conversationId) throw new HttpError(404, "Thread not found.");
+    if (parent.parentId) throw new HttpError(400, "Replies cannot have their own threads.");
+    if (parent.deletedAt) throw new HttpError(409, "That message was deleted.");
+  }
+  const message = await tx.message.create({
+    data: { conversationId, authorId, clientMessageId, body, parentId, forwardedFromId },
+    select: { id: true, createdAt: true }
+  });
+  if (parentId) {
+    await tx.message.update({ where: { id: parentId }, data: { replyCount: { increment: 1 }, lastReplyAt: message.createdAt } });
+  }
+  await enqueue(tx, "message.created", { messageId: message.id });
+  await syncMessageLinks(tx, message.id, body);
+  return message;
 }
 
 // Opaque pagination cursor: clients pass it back verbatim and must not parse it.

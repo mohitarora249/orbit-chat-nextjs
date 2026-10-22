@@ -448,7 +448,7 @@ const SHORTCUTS: [string, string][] = [
 const COMMANDS: [string, string][] = [
   // ["/giphy cats", "Pick a GIF to post (Send, Shuffle or Cancel)"],
   ["/remind me to stretch in 20 minutes", "Also \"at 3pm\", \"tomorrow at 9am\", \"on friday\""],
-  ["/remind list", "Open your reminders (also under Reminders in the sidebar)"],
+  ["/remind list", "Open your reminders (also under Reminders in the sidebar). To be reminded about a message, choose the alarm clock on it"],
   ["/status 🌴 On vacation", "Set your status; /status clear removes it"],
   ["/poll", "Create a poll: one or several choices, anonymous, closing time"]
 ];

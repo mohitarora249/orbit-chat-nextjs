@@ -1,10 +1,11 @@
 "use client";
 
 import { Fragment, KeyboardEvent, memo, useEffect, useRef, useState } from "react";
-import { AlertTriangle, CloudOff, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
+import { AlarmClock, AlertTriangle, CloudOff, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { PollCard } from "@/components/chat/poll";
+import { inMinutes, nextMondayAt9, tomorrowAt9, WhenMenu, type WhenOption } from "@/components/chat/when-menu";
 import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
 import type { MessageOp } from "@/components/chat/pending";
 import { isGifUrl, parseLinks } from "@/lib/links";
@@ -25,6 +26,8 @@ export type MessageActions = {
   onForward: (message: ChatMessage) => void;
   // Votes in or closes a poll.
   onAction: (message: ChatMessage, action: MessageAction) => void;
+  // "Remind me about this": sets a personal reminder that links back to the message.
+  onRemind: (message: ChatMessage, at: Date) => void;
   // Jumps to the original of a forwarded message; returns null if the viewer cannot see its conversation.
   openForwarded: (forward: ChatForward) => (() => void) | null;
   // Called when a message starts editing because `editRequested` was set, so the request is not repeated.
@@ -180,6 +183,14 @@ export function ForwardedCard({ forward, usersById, me, onOpen }: { forward: Cha
   );
 }
 
+const REMIND_OPTIONS: WhenOption[] = [
+  { label: "In 20 minutes", at: inMinutes(20) },
+  { label: "In 1 hour", at: inMinutes(60) },
+  { label: "In 3 hours", at: inMinutes(180) },
+  { label: "Tomorrow morning", at: tomorrowAt9 },
+  { label: "Next Monday morning", at: nextMondayAt9 }
+];
+
 const failureLabels: Record<MessageOp["kind"], { what: (op: MessageOp) => string; dismiss: string }> = {
   send: { what: () => "Not sent", dismiss: "Delete" },
   edit: { what: () => "Edit not saved", dismiss: "Undo edit" },
@@ -205,10 +216,11 @@ function FailedOps({ ops, onRetry, onDismiss }: { ops: MessageOp[]; onRetry: (op
   );
 }
 
-function MessageItemImpl({ message, ops, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, editRequested, onReact, onEdit, onDelete, onRetry, onDismiss, onOpenThread, onForward, onAction, openForwarded, onEditRequestHandled }: Props) {
+function MessageItemImpl({ message, ops, grouped, me, canModerate, usersById, highlighted, replyTyping, readOnly, editRequested, onReact, onEdit, onDelete, onRetry, onDismiss, onOpenThread, onForward, onAction, onRemind, openForwarded, onEditRequestHandled }: Props) {
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
   const [picker, setPicker] = useState(false);
+  const [remindMenu, setRemindMenu] = useState(false);
   const pending = isOptimistic(message);
   const failed = ops?.filter(op => op.status === "failed") ?? [];
   const queued = ops?.find(op => op.kind === "send" && op.status === "pending" && op.network);
@@ -347,12 +359,17 @@ function MessageItemImpl({ message, ops, grouped, me, canModerate, usersById, hi
         )}
       </div>
       {!pending && !deleted && !editing && (
-        <div className={cn("absolute -top-4 right-2 z-10 items-center gap-0.5 rounded-lg border border-zinc-200/80 bg-card p-0.5 shadow-float", picker ? "flex" : "hidden group-hover:flex group-focus-within:flex")}>
+        <div className={cn("absolute -top-4 right-2 z-10 items-center gap-0.5 rounded-lg border border-zinc-200/80 bg-card p-0.5 shadow-float", picker || remindMenu ? "flex" : "hidden group-hover:flex group-focus-within:flex")}>
           {!readOnly && <button title="Add reaction" aria-label="Add reaction" onClick={() => setPicker(true)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><SmilePlus size={15}/></button>}
           {onOpenThread && <button title="Reply in thread" aria-label="Reply in thread" onClick={() => onOpenThread(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><MessageSquareText size={15}/></button>}
           <button title="Forward message" aria-label="Forward message" onClick={() => onForward(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Forward size={15}/></button>
+          <button title="Remind me about this" aria-label="Remind me about this" aria-expanded={remindMenu} onClick={() => setRemindMenu(!remindMenu)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><AlarmClock size={15}/></button>
           {mine && !readOnly && !isGifUrl(message.body) && <button title="Edit message" aria-label="Edit message" onClick={startEdit} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800"><Pencil size={14}/></button>}
           {(mine || canModerate) && <button title="Delete message" aria-label="Delete message" onClick={() => onDelete(message)} className="rounded-md p-1.5 text-zinc-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14}/></button>}
+          {remindMenu && (
+            <WhenMenu title="Remind me about this" submitLabel="Remind me" options={REMIND_OPTIONS} className="right-0 top-8" onClose={() => setRemindMenu(false)}
+              onPick={at => { setRemindMenu(false); onRemind(message, at); }}/>
+          )}
           {picker && (
             <EmojiPicker className="right-0 top-8" onClose={() => setPicker(false)} onPick={emoji => {
               setPicker(false);

@@ -24,7 +24,8 @@ A web-only team chat starter using **Next.js App Router, Next.js Route Handlers,
 - **Forwarding:** hover a message and click forward to share it to up to 10 channels and people at once, with an optional comment. The original appears as a quoted card (author, text, files, where and when it was posted) that stays in sync with edits and says so if the original is deleted. Cards from private channels and DMs don't name the conversation, and forwarding out of one warns you first.
 - **Link previews:** links in messages are clickable, and the server unfurls up to three per message (Open Graph / Twitter card title, description, site name and image) in the background, then pushes the preview to everyone in the conversation. Fetches only reach public addresses on ports 80/443, follow at most 3 redirects, give up after 5 seconds, read at most 1 MB, and are cached in the database for 24 hours (1 hour for pages with nothing to show).
 - **Keyboard-first:** ↑ in an empty message box edits your last message there (main list or thread); Alt/⌥ + ↑/↓ moves to the previous or next conversation in the sidebar; Esc marks the open conversation read and hides the "New messages" line. ⌘/ shows every shortcut.
-- **Slash commands:** type `/` for a list. `/giphy` is turned off for now (uncomment it in `SLASH_COMMANDS` in `src/lib/commands.ts` to bring it back; it needs `GIPHY_API_KEY`). `/remind me to stretch in 20 minutes` (also `at 3pm`, `tomorrow at 9am`, `on friday`) sets a reminder that pops up with a sound when it is due, on any of your tabs or the next time you open the app, until you mark it done or snooze it. **Reminders** in the sidebar (or `/remind list`) lists them all: overdue ones (counted on the sidebar item) to mark done or snooze, and upcoming ones to delete. `/status 🌴 On vacation` sets your status and `/status clear` removes it. `/poll` opens a poll dialog (one or several choices, anonymous, closing time); votes update live, **View votes** on a named poll shows who chose each option, and the author or an admin can close it and reopen it later (votes are kept; the card shows "Reopened"). Start a message with `//` to send text that begins with `/`.
+- **Slash commands:** type `/` for a list. `/giphy` is turned off for now (uncomment it in `SLASH_COMMANDS` in `src/lib/commands.ts` to bring it back; it needs `GIPHY_API_KEY`). `/remind me to stretch in 20 minutes` (also `at 3pm`, `tomorrow at 9am`, `on friday`) sets a reminder that pops up with a sound when it is due, on any of your tabs or the next time you open the app, until you mark it done or snooze it. The alarm clock on any message (**Remind me about this**) sets a reminder that links back to it. **Reminders** in the sidebar (or `/remind list`) lists them all: overdue ones (counted on the sidebar item) to mark done or snooze, and upcoming ones to delete. `/status 🌴 On vacation` sets your status and `/status clear` removes it. `/poll` opens a poll dialog (one or several choices, anonymous, closing time); votes update live, **View votes** on a named poll shows who chose each option, and the author or an admin can close it and reopen it later (votes are kept; the card shows "Reopened"). Start a message with `//` to send text that begins with `/`.
+- **Scheduled messages:** the calendar button next to Send schedules the text for tomorrow morning, next Monday or any time within a year (in a thread too). **Scheduled** in the sidebar lists them, to send now, reschedule, edit or delete; a message that can't be sent when its time comes (you left the channel, it was archived, the thread was deleted) stays there marked "Not sent". Files, polls and forwards are sent straight away.
 - **Reliable delivery:** every change writes an `OutboxEvent` in the same transaction; a worker publishes it with retries, backoff and dead-lettering.
 
 ## Requirements
@@ -106,7 +107,9 @@ Browser (Next.js / React)
 
 Outbox worker (runs inside server.ts, safe on many instances via FOR UPDATE SKIP LOCKED)
   ├── realtime lane: message.created/updated, conversation.created/read → Socket.IO rooms
-  └── scan lane: attachment.scan → ClamAV (INSTREAM) → CLEAN / INFECTED
+  ├── timed lane: reminder.due, message.scheduled (queued with availableAt = the due time)
+  ├── scan lane: attachment.scan → ClamAV (INSTREAM) → CLEAN / INFECTED
+  └── unfurl lane: message.unfurl → link previews
 ```
 
 **Message path:** the client generates an idempotency key → POST validates and writes the message **and** an outbox event in one transaction → the API returns the canonical message → the worker (woken right after the commit, and polling every second as a fallback) loads the current state and broadcasts it to the conversation room. Failures retry with exponential backoff; after 8 attempts the event is dead-lettered (`failedAt` set). The browser never asks the server to publish. After a reconnect, the client refreshes conversations and unread counts, then catches up the open conversation and thread from durable history.
@@ -136,6 +139,7 @@ src/
     auth.ts session.ts access.ts           auth + authorization
     messages.ts conversations.ts          serializers, cursors, unread counts
     outbox.ts outbox-worker.ts            transactional outbox + worker
+    reminders.ts scheduled.ts             reminders and scheduled messages (fired by the worker)
     storage.ts scanner.ts                 S3 presigning, ClamAV client
 prisma/  schema.prisma, migrations/, seed.ts
 server.ts  docker-compose.yml  docker/seaweedfs-s3.json
