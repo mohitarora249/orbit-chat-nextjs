@@ -14,7 +14,8 @@ export type MessageOp = {
   messageId: string;
   status: "pending" | "failed";
   error: string | null;
-  // The request never reached the server, so it is retried by itself after reconnecting.
+  // The request never reached the server, so it is retried by itself after reconnecting. Sends stay pending
+  // meanwhile, queued in IndexedDB (see offline-queue.ts); other changes are marked failed.
   network: boolean;
 } & (
   | { kind: "send"; message: ChatMessage }

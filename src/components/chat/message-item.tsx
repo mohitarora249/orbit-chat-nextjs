@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, KeyboardEvent, memo, useEffect, useRef, useState } from "react";
-import { AlertTriangle, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
+import { AlertTriangle, CloudOff, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
 import { PollCard } from "@/components/chat/poll";
@@ -211,6 +211,7 @@ function MessageItemImpl({ message, ops, grouped, me, canModerate, usersById, hi
   const [picker, setPicker] = useState(false);
   const pending = isOptimistic(message);
   const failed = ops?.filter(op => op.status === "failed") ?? [];
+  const queued = ops?.find(op => op.kind === "send" && op.status === "pending" && op.network);
   const savingEdit = ops?.some(op => op.kind === "edit" && op.status === "pending");
   const pendingEmoji = new Set(ops?.flatMap(op => op.kind === "react" && op.status === "pending" ? [op.emoji] : []));
   const deleted = Boolean(message.deletedAt);
@@ -328,6 +329,14 @@ function MessageItemImpl({ message, ops, grouped, me, canModerate, usersById, hi
           </div>
         )}
         {failed.length > 0 && !editing && <FailedOps ops={failed} onRetry={onRetry} onDismiss={onDismiss}/>}
+        {queued && (
+          <p role="status" className="mt-1 flex flex-wrap items-center gap-x-1.5 text-[11px] leading-5 text-zinc-500">
+            <CloudOff size={12} className="shrink-0"/>
+            <span className="font-medium">Waiting for connection.</span>
+            <span className="text-zinc-400">Sends when you're back online.</span>
+            <button onClick={() => onDismiss(queued)} className="font-medium underline-offset-2 transition hover:text-zinc-700 hover:underline">Delete</button>
+          </p>
+        )}
         {onOpenThread && (message.replyCount > 0 || replyTyping) && (
           <button onClick={() => onOpenThread(message)} className="-ml-1.5 mt-1 flex items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-brand-600 transition hover:bg-card hover:ring-1 hover:ring-zinc-200">
             <MessageSquareText size={14}/>{message.replyCount > 0 ? `${message.replyCount} ${message.replyCount === 1 ? "reply" : "replies"}` : "Thread"}

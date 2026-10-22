@@ -17,6 +17,7 @@ import { StatusMenu, type StatusPatch } from "@/components/chat/status-menu";
 import { BrowseChannelsDialog, ChannelDetailsDialog, channelPermissions, type ChannelTab } from "@/components/chat/channels";
 import { compareMessages, conversationLabel, dayLabel, dmPartnerId, isGrouped, isOptimistic, keepMyVotes, keepUnsent, mergeMessages, timeLabel, upsertMessage } from "@/components/chat/helpers";
 import { applyOps, failureText, opKey, opsByMessage, outgoing, withOps, type MessageOp, type OpChange, type PendingOps } from "@/components/chat/pending";
+import { queueSend, queuedSends, unqueueSends } from "@/components/chat/offline-queue";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { parsePollArgs, parseReminder, parseStatus, reminderTimeLabel, type SlashCommandName } from "@/lib/commands";
@@ -253,6 +254,7 @@ export function ChatApp() {
   // after the message was saved.
   const confirmSends = useCallback((messages: ChatMessage[]) => {
     const done = new Set(messages.map(message => `send:${message.clientMessageId}`));
+    void unqueueSends(Object.values(opsRef.current).flatMap(op => op.kind === "send" && done.has(op.key) ? [op.message.clientMessageId] : []));
     setOps(current => Object.keys(current).some(key => done.has(key))
       ? Object.fromEntries(Object.entries(current).filter(([key]) => !done.has(key)))
       : current);
@@ -528,23 +530,30 @@ export function ChatApp() {
 
   // Shows a change at once and sends it. The server's copy replaces the op when it answers; on failure the op
   // stays, marked failed, so the message can offer to retry. A newer change of the same kind replaces an op,
-  // and the replaced request's answer is then ignored.
+  // and the replaced request's answer is then ignored. Sends are also queued in IndexedDB until the server has
+  // them, and one that can't reach the server stays pending, waiting to be replayed (see offline-queue.ts).
   const runOp = useCallback(async (change: OpChange) => {
     const key = opKey(change);
     const seq = ++opSeqRef.current;
     const op = { ...change, key, seq, status: "pending", error: null, network: false } as MessageOp;
     setOps(current => ({ ...current, [key]: op }));
+    if (change.kind === "send") void queueSend(change.message);
     try {
       const { message } = await opRequest(change);
-      if (change.kind === "send") placeMessage(message);
-      else if (opsRef.current[key]?.seq === seq) applyUpdated(message);
+      if (change.kind === "send") {
+        placeMessage(message);
+        void unqueueSends([message.clientMessageId]);
+      } else if (opsRef.current[key]?.seq === seq) applyUpdated(message);
       setOps(current => {
         if (current[key]?.seq !== seq) return current;
         // Nothing else can happen to a deleted message.
         return Object.fromEntries(Object.entries(current).filter(([k, other]) => k !== key && !(change.kind === "delete" && other.messageId === change.messageId)));
       });
     } catch (error) {
-      const failed = { ...op, status: "failed", error: failureText(error, "Something went wrong."), network: error instanceof TypeError } as MessageOp;
+      const network = error instanceof TypeError;
+      const failed = (change.kind === "send" && network
+        ? { ...op, network }
+        : { ...op, status: "failed", error: failureText(error, "Something went wrong."), network }) as MessageOp;
       setOps(current => current[key]?.seq === seq ? { ...current, [key]: failed } : current);
     }
   }, [opRequest, placeMessage, applyUpdated]);
@@ -560,8 +569,40 @@ export function ChatApp() {
       const { [op.key]: _dismissed, ...rest } = current;
       return rest;
     });
-    if (op.kind === "send") dropMessage(op.message.clientMessageId);
+    if (op.kind === "send") {
+      dropMessage(op.message.clientMessageId);
+      void unqueueSends([op.message.clientMessageId]);
+    }
   }, [dropMessage]);
+
+  // Sends again every change that never reached the server: queued sends, in the order they were written,
+  // and failed changes.
+  const replayOffline = useCallback(() => {
+    for (const op of Object.values(opsRef.current)) if (op.network) retryOp(op);
+  }, [retryOp]);
+
+  // Messages queued in an earlier visit that the server may not have yet. Their sends run before anything
+  // new, and the ones the server already has come back as the stored message.
+  useEffect(() => {
+    if (!meId) return;
+    let cancelled = false;
+    void queuedSends(meId).then(messages => {
+      if (cancelled) return;
+      for (const message of messages) {
+        const change = { kind: "send", messageId: message.id, message } as const;
+        if (opsRef.current[opKey(change)]) continue;
+        placeMessage(message);
+        void runOp(change);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [meId, placeMessage, runOp]);
+
+  // The socket's reconnect also replays, but a short drop can leave the socket up.
+  useEffect(() => {
+    window.addEventListener("online", replayOffline);
+    return () => window.removeEventListener("online", replayOffline);
+  }, [replayOffline]);
 
   // ---- Socket --------------------------------------------------------------------------------------------
 
@@ -577,7 +618,7 @@ export function ChatApp() {
         // Events sent while we were offline are not replayed, so catch up from durable state.
         void refreshConversations();
         // Changes that never reached the server go out again now that it is back.
-        for (const op of Object.values(opsRef.current)) if (op.status === "failed" && op.network) retryOp(op);
+        replayOffline();
         api<{ reminders: ChatReminder[] }>("/api/reminders").then(data => setReminders(data.reminders)).catch(() => undefined);
         const conversationId = activeIdRef.current;
         if (conversationId) void loadMessages(conversationId, { catchUp: true });
@@ -651,7 +692,7 @@ export function ChatApp() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, retryOp, addConversation, applyDetails, removeConversation, updateConversation, setStatus, setDraft, alertReminder]);
+  }, [meId, loadMessages, refreshConversations, handleNew, applyUpdated, replayOffline, addConversation, applyDetails, removeConversation, updateConversation, setStatus, setDraft, alertReminder]);
 
   // Idle detection: no input in this tab for IDLE_AFTER_MS makes it idle. The server combines all of a
   // person's tabs, so they show as away only when every tab is idle.
