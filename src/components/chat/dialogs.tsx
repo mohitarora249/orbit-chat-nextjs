@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, Fragment, KeyboardEvent, useEffect, useMemo, useState } from "react";
-import { Bell, BellOff, Check, Hash, HelpCircle, Link2, Loader2, Lock, LogOut, Monitor, Moon, Plus, Search, ShieldAlert, Sun, X } from "lucide-react";
+import { FormEvent, Fragment, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { AtSign, Bell, BellOff, CalendarDays, Check, Filter, Hash, HelpCircle, Link2, Loader2, Lock, Paperclip, LogOut, Monitor, Moon, Plus, Search, ShieldAlert, Sun, X } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, Popover } from "@/components/ui/overlay";
@@ -11,11 +11,12 @@ import { POLL_DURATIONS, pollClosesAt } from "@/components/chat/poll";
 import { api } from "@/lib/api";
 import { POLL_MAX_OPTIONS, POLL_MIN_OPTIONS, POLL_OPTION_MAX, POLL_QUESTION_MAX } from "@/lib/commands";
 import { mentionsToText } from "@/lib/mentions";
+import { hasSearchFilters, parseSearch, personHandle, trailingFilter } from "@/lib/search";
 import { ACCENTS, useTheme, type ThemeMode } from "@/lib/theme";
 import { cn, HIGHLIGHT_END, HIGHLIGHT_START } from "@/lib/utils";
 import type { ChatForward, ChatMessage, ChatUser, ConversationSummary, SearchHit } from "@/lib/types";
 
-type JumpItem = { key: string; label: string; icon: React.ReactNode; run: () => void };
+type JumpItem = { key: string; label: string; hint?: string; icon: React.ReactNode; run: () => void };
 
 function Snippet({ text, nameOf }: { text: string; nameOf: (userId: string) => string | undefined }) {
   // ts_headline wraps matches in marker characters; render them as <mark> using text nodes only.
@@ -29,7 +30,18 @@ function Snippet({ text, nameOf }: { text: string; nameOf: (userId: string) => s
   );
 }
 
+type SearchPage = { hits: SearchHit[]; nextCursor: string | null; notes: string[] };
+
+const FILTER_STARTERS = ["in:#", "from:@", "has:file", "before:", "after:"];
+
+function searchUrl(query: string, cursor?: string) {
+  const params = new URLSearchParams({ q: query, tz: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  if (cursor) params.set("cursor", cursor);
+  return `/api/search?${params}`;
+}
+
 // ⌘K: jump to a channel or person, and full-text search across every message the user can see.
+// Search filters (in:, from:, has:, before:/after:/on:) are completed from the same channel and people lists.
 export function CommandPalette({ conversations, users, me, label, onOpenConversation, onOpenDm, onOpenHit, onClose }: {
   conversations: ConversationSummary[];
   users: ChatUser[];
@@ -45,9 +57,37 @@ export function CommandPalette({ conversations, users, me, label, onOpenConversa
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
+  const [notes, setNotes] = useState<string[]>([]);
   const [selected, setSelected] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const typingFilter = useMemo(() => trailingFilter(query), [query]);
+  const filtered = useMemo(() => hasSearchFilters(parseSearch(query)), [query]);
 
   const jumpItems = useMemo<JumpItem[]>(() => {
+    if (typingFilter) {
+      const { start, key, partial } = typingFilter;
+      const complete = (text: string) => () => { setQuery(`${query.slice(0, start)}${text} `); inputRef.current?.focus(); };
+      const channels = key === "in:#" || key === "in:"
+        ? conversations.filter(c => c.type === "CHANNEL" && c.name.includes(partial)).map(c => ({
+          key: c.id, label: `in:#${c.name}`, icon: c.isPrivate ? <Lock size={14}/> : <Hash size={14}/>, run: complete(`in:#${c.name}`)
+        }))
+        : [];
+      const prefix = key.startsWith("from") ? "from:@" : key === "in:@" || key === "in:" ? "in:@" : null;
+      const people = prefix
+        ? users.filter(u => personHandle(u.displayName).includes(personHandle(partial))).map(u => ({
+          key: u.id, label: `${prefix}${personHandle(u.displayName)}`, hint: u.id === me.id ? `${u.displayName} (you)` : u.displayName,
+          icon: <Avatar name={u.displayName} color={u.avatarColor} size="sm"/>, run: complete(`${prefix}${personHandle(u.displayName)}`)
+        }))
+        : [];
+      const fixed = key === "has:"
+        ? [{ key: "has:file", label: "has:file", hint: "Messages with files", icon: <Paperclip size={14}/>, run: complete("has:file") },
+          { key: "has:link", label: "has:link", hint: "Messages with links", icon: <Link2 size={14}/>, run: complete("has:link") }]
+        : ["before:", "after:", "on:"].includes(key)
+          ? ["today", "yesterday"].map(day => ({ key: day, label: `${key}${day}`, hint: "or YYYY-MM-DD", icon: <CalendarDays size={14}/>, run: complete(`${key}${day}`) }))
+          : key === "from:" || key === "from:@" ? [{ key: "from:me", label: "from:me", hint: "Your messages", icon: <AtSign size={14}/>, run: complete("from:me") }] : [];
+      return [...fixed, ...channels, ...people].filter(item => item.label.toLowerCase().includes(partial)).slice(0, 8);
+    }
+    if (filtered) return [];
     const q = query.trim().toLowerCase().replace(/^#/, "");
     const channels = conversations.filter(c => c.type === "CHANNEL" && c.name.includes(q)).map(c => ({
       key: c.id, label: c.name, icon: c.isPrivate ? <Lock size={14}/> : <Hash size={14}/>, run: () => onOpenConversation(c.id)
@@ -56,19 +96,20 @@ export function CommandPalette({ conversations, users, me, label, onOpenConversa
       key: user.id, label: user.id === me.id ? `${user.displayName} (you)` : user.displayName, icon: <Avatar name={user.displayName} color={user.avatarColor} size="sm"/>, run: () => onOpenDm(user.id)
     }));
     return [...channels, ...people].slice(0, q ? 6 : 8);
-  }, [conversations, users, me.id, query, onOpenConversation, onOpenDm]);
+  }, [conversations, users, me.id, query, typingFilter, filtered, onOpenConversation, onOpenDm]);
 
   useEffect(() => {
     const q = query.trim();
     setError("");
-    if (q.length < 2) { setHits([]); setNextCursor(null); return; }
+    if (q.length < 2) { setHits([]); setNextCursor(null); setNotes([]); return; }
     const controller = new AbortController();
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        const data = await api<{ hits: SearchHit[]; nextCursor: string | null }>(`/api/search?q=${encodeURIComponent(q)}`, { signal: controller.signal });
+        const data = await api<SearchPage>(searchUrl(q), { signal: controller.signal });
         setHits(data.hits);
         setNextCursor(data.nextCursor);
+        setNotes(data.notes);
       } catch (err) {
         if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Search failed.");
       } finally {
@@ -82,7 +123,7 @@ export function CommandPalette({ conversations, users, me, label, onOpenConversa
 
   async function loadMore() {
     if (!nextCursor) return;
-    const data = await api<{ hits: SearchHit[]; nextCursor: string | null }>(`/api/search?q=${encodeURIComponent(query.trim())}&cursor=${encodeURIComponent(nextCursor)}`);
+    const data = await api<SearchPage>(searchUrl(query.trim(), nextCursor));
     setHits(current => [...current, ...data.hits]);
     setNextCursor(data.nextCursor);
   }
@@ -107,21 +148,31 @@ export function CommandPalette({ conversations, users, me, label, onOpenConversa
     <Dialog title="Jump to or search" onClose={onClose} className="max-w-xl">
       <div className="flex items-center gap-2.5 border-b border-zinc-100 px-4 py-3.5">
         <Search size={16} className="text-zinc-400"/>
-        <input autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder="Search messages, channels and people" aria-label="Search" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-zinc-400"/>
+        <input ref={inputRef} autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder="Search, or filter with in:#channel from:@person has:file" aria-label="Search" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-zinc-400"/>
         {searching && <Loader2 size={14} className="animate-spin text-zinc-400"/>}
       </div>
       <div className="max-h-[55vh] overflow-y-auto p-2">
-        {jumpItems.length > 0 && <div className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-400">Jump to</div>}
+        {jumpItems.length > 0 && <div className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-zinc-400">{typingFilter ? "Filters" : "Jump to"}</div>}
         {jumpItems.map((item, index) => (
           <button key={item.key} onMouseEnter={() => setSelected(index)} onClick={item.run} className={cn("flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-sm", selected === index ? "bg-zinc-100 text-zinc-900" : "text-zinc-700")}>
-            <span className="text-zinc-400">{item.icon}</span><span className="truncate">{item.label}</span>
+            <span className="text-zinc-400">{item.icon}</span><span className={cn("truncate", typingFilter && "font-mono text-[13px]")}>{item.label}</span>
+            {item.hint && <span className="ml-auto truncate text-xs text-zinc-400">{item.hint}</span>}
           </button>
         ))}
+        {!query.trim() && (
+          <div className="flex flex-wrap items-center gap-1.5 px-2.5 pb-1 pt-3 text-[11px] text-zinc-400">
+            <Filter size={12}/>
+            {FILTER_STARTERS.map(starter => (
+              <button key={starter} onClick={() => { setQuery(starter); inputRef.current?.focus(); }} className="rounded border border-zinc-200 px-1.5 py-0.5 font-mono text-zinc-500 transition hover:border-zinc-300 hover:text-zinc-700">{starter}</button>
+            ))}
+          </div>
+        )}
         {query.trim().length >= 2 && (
           <>
             <div className="px-2.5 pb-1 pt-3 text-[11px] font-medium text-zinc-400">Messages</div>
             {error && <p className="px-3 py-2 text-xs text-rose-600">{error}</p>}
-            {!searching && !error && hits.length === 0 && <p className="px-3 py-2 text-xs text-zinc-400">No messages match “{query.trim()}”.</p>}
+            {!typingFilter && notes.map(note => <p key={note} className="px-3 py-1 text-xs text-amber-700">{note}</p>)}
+            {!searching && !error && hits.length === 0 && (!notes.length || typingFilter) && <p className="px-3 py-2 text-xs text-zinc-400">No messages match “{query.trim()}”.</p>}
             {hits.map((hit, index) => {
               const position = jumpItems.length + index;
               return (
@@ -133,7 +184,9 @@ export function CommandPalette({ conversations, users, me, label, onOpenConversa
                       <span className="truncate">{hit.conversation.type === "CHANNEL" ? "#" : ""}{hitLabel(hit)}{hit.message.parentId ? " · in a thread" : ""}</span>
                       <span className="ml-auto shrink-0 text-[10px] text-zinc-400">{dayLabel(hit.message.createdAt)} {timeLabel(hit.message.createdAt)}</span>
                     </div>
-                    <p className="mt-0.5 line-clamp-2 text-xs text-zinc-700"><Snippet text={hit.snippet} nameOf={id => users.find(user => user.id === id)?.displayName}/></p>
+                    <p className="mt-0.5 line-clamp-2 text-xs text-zinc-700">{hit.snippet
+                      ? <Snippet text={hit.snippet} nameOf={id => users.find(user => user.id === id)?.displayName}/>
+                      : hit.message.attachments.map(file => file.fileName).join(", ")}</p>
                   </div>
                 </button>
               );
@@ -142,7 +195,7 @@ export function CommandPalette({ conversations, users, me, label, onOpenConversa
           </>
         )}
       </div>
-      <div className="flex flex-wrap gap-x-3 border-t border-zinc-100 bg-zinc-50/60 px-4 py-2 text-[11px] text-zinc-400"><span>↑↓ navigate</span><span>Enter open</span><span>Esc close</span><span className="ml-auto hidden sm:inline">&quot;phrases&quot;, OR, -exclude</span></div>
+      <div className="flex flex-wrap gap-x-3 border-t border-zinc-100 bg-zinc-50/60 px-4 py-2 text-[11px] text-zinc-400"><span>↑↓ navigate</span><span>Enter open</span><span>Esc close</span><span className="ml-auto hidden sm:inline">&quot;phrases&quot;, OR, -exclude, in: from: has: before: after:</span></div>
     </Dialog>
   );
 }
@@ -475,7 +528,8 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
           <li>Type <b>@</b> (or use the @ button) to mention someone; mentions appear in their Activity.</li>
           <li>Drop or paste files into the composer. Files are scanned for malware before anyone can download them.</li>
           <li>To send a message that starts with <b>/</b>, start it with <b>//</b>.</li>
-          <li>Search supports <b>"exact phrases"</b>, <b>OR</b> and <b>-excluded</b> words.</li>
+          <li>Search matches the start of words, and supports <b>"exact phrases"</b>, <b>OR</b> and <b>-excluded</b> words.</li>
+          <li>Narrow a search with <b>in:#channel</b>, <b>in:@person</b> (your DM), <b>from:@person</b>, <b>from:me</b>, <b>has:file</b>, <b>has:link</b> and <b>before:</b>, <b>after:</b> or <b>on:</b> a date (YYYY-MM-DD, today, yesterday).</li>
         </ul>
       </div>
     </Dialog>
