@@ -1,14 +1,15 @@
 "use client";
 
-import { Fragment, KeyboardEvent, memo, useEffect, useRef, useState } from "react";
+import { KeyboardEvent, memo, useEffect, useRef, useState } from "react";
 import { AlarmClock, AlertTriangle, CloudOff, Download, FileText, Forward, Hash, Loader2, Lock, MessageSquareText, Pencil, ShieldAlert, SmilePlus, Trash2, User } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { EmojiPicker } from "@/components/chat/emoji-picker";
+import { LINK_REL, Markdown } from "@/components/chat/markdown";
 import { PollCard } from "@/components/chat/poll";
 import { inMinutes, nextMondayAt9, tomorrowAt9, WhenMenu, type WhenOption } from "@/components/chat/when-menu";
 import { dayLabel, isOptimistic, timeLabel } from "@/components/chat/helpers";
 import type { MessageOp } from "@/components/chat/pending";
-import { isGifUrl, parseLinks } from "@/lib/links";
+import { isGifUrl } from "@/lib/links";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets, parseMentions } from "@/lib/mentions";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ChatAttachment, ChatForward, ChatLinkPreview, ChatMessage, ChatUser, MessageAction } from "@/lib/types";
@@ -51,19 +52,6 @@ type Props = MessageActions & {
   editRequested?: boolean;
 };
 
-// Links open in a new tab without telling the site where they came from. parseLinks only yields http(s) URLs.
-const LINK_REL = "noopener noreferrer nofollow";
-
-function TextWithLinks({ text }: { text: string }) {
-  return (
-    <>
-      {parseLinks(text).map((part, index) => typeof part === "string"
-        ? <Fragment key={index}>{part}</Fragment>
-        : <a key={index} href={part.url} target="_blank" rel={LINK_REL} className="text-brand-600 underline decoration-brand-200 underline-offset-2 transition hover:decoration-brand-500">{part.url}</a>)}
-    </>
-  );
-}
-
 // A GIF posted with /giphy. The body is only its URL, so it is shown as the image.
 function GifView({ url }: { url: string }) {
   return (
@@ -72,20 +60,6 @@ function GifView({ url }: { url: string }) {
       <img src={url} alt="GIF" loading="lazy" referrerPolicy="no-referrer" className="h-40 w-auto max-w-full rounded-lg bg-zinc-100 object-cover"/>
       <span className="mt-0.5 block text-[10px] font-medium text-zinc-400">via GIPHY</span>
     </span>
-  );
-}
-
-// Renders text with mention tokens shown as the person's current name. Plain React text nodes only, never HTML.
-function MessageBody({ body, usersById, meId }: { body: string; usersById: Map<string, ChatUser>; meId: string }) {
-  return (
-    <>
-      {parseMentions(body).map((part, index) => {
-        if (typeof part === "string") return <TextWithLinks key={index} text={part}/>;
-        const forMe = part.kind !== "user" || part.userId === meId;
-        const label = part.kind === "user" ? usersById.get(part.userId)?.displayName ?? "unknown user" : part.kind;
-        return <span key={index} className={cn("rounded px-0.5 font-semibold", forMe ? "bg-amber-200/80 text-amber-900" : "bg-brand-50 text-brand-700")}>@{label}</span>;
-      })}
-    </>
   );
 }
 
@@ -161,10 +135,9 @@ export function ForwardedCard({ forward, usersById, me, onOpen }: { forward: Cha
           </div>
           {forward.body && isGifUrl(forward.body) && <div className="mt-1"><GifView url={forward.body}/></div>}
           {forward.body && !isGifUrl(forward.body) && (
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-zinc-800">
-              <MessageBody body={forward.body} usersById={usersById} meId={me.id}/>
-              {forward.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(forward.editedAt)} at ${timeLabel(forward.editedAt)}`}>(edited)</span>}
-            </p>
+            <div className="mt-1 break-words text-sm leading-6 text-zinc-800">
+              <Markdown body={forward.body} usersById={usersById} meId={me.id}/>
+            </div>
           )}
           {forward.poll && <PollCard poll={forward.poll} me={me} usersById={usersById} interactive={false}/>}
           {forward.attachments.length > 0 && (
@@ -302,12 +275,11 @@ function MessageItemImpl({ message, ops, grouped, me, canModerate, usersById, hi
           <div className="mt-0.5"><GifView url={message.body}/></div>
         ) : (
           message.body && (
-            <p className={cn("whitespace-pre-wrap break-words text-sm leading-6 transition-colors", pending ? "text-zinc-400" : "text-zinc-800")}>
-              <MessageBody body={message.body} usersById={usersById} meId={me.id}/>
-              {savingEdit
+            <div className={cn("break-words text-sm leading-6 transition-colors", pending ? "text-zinc-400" : "text-zinc-800")}>
+              <Markdown body={message.body} usersById={usersById} meId={me.id} trailing={savingEdit
                 ? <span className="ml-1 text-[11px] text-zinc-400">(saving…)</span>
-                : message.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(message.editedAt)} at ${timeLabel(message.editedAt)}`}>(edited)</span>}
-            </p>
+                : message.editedAt && <span className="ml-1 text-[11px] text-zinc-400" title={`Edited ${dayLabel(message.editedAt)} at ${timeLabel(message.editedAt)}`}>(edited)</span>}/>
+            </div>
           )
         )}
         {!deleted && message.forwarded && (

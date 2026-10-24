@@ -528,6 +528,7 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
           <li>Type <b>@</b> (or use the @ button) to mention someone; mentions appear in their Activity.</li>
           <li>Drop or paste files into the composer. Files are scanned for malware before anyone can download them.</li>
           <li>To send a message that starts with <b>/</b>, start it with <b>//</b>.</li>
+          <li>Format with <b>**bold**</b>, <i>*italic*</i>, <code className="font-mono">`code`</code>, <code className="font-mono">```</code> code blocks (add a language, like <code className="font-mono">```js</code>), <b>&gt;</b> quotes and <b>-</b> or <b>1.</b> lists. Put <b>\</b> before a symbol to type it as is.</li>
           <li>Search matches the start of words, and supports <b>"exact phrases"</b>, <b>OR</b> and <b>-excluded</b> words.</li>
           <li>Narrow a search with <b>in:#channel</b>, <b>in:@person</b> (your DM), <b>from:@person</b>, <b>from:me</b>, <b>has:file</b>, <b>has:link</b> and <b>before:</b>, <b>after:</b> or <b>on:</b> a date (YYYY-MM-DD, today, yesterday).</li>
         </ul>

@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { HttpError } from "./errors";
-import { extractLinks } from "./links";
+import { extractLinks } from "./markdown";
 import { enqueue } from "./outbox";
 import type { ChatForward, ChatLinkPreview, ChatMessage, ChatPoll, ReactionSummary } from "./types";
 

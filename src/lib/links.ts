@@ -1,13 +1,12 @@
-// Finding links in message bodies. Shared by the server (which unfurls them) and the renderer (which makes
-// them clickable), so both agree on what counts as a link. No Node.js imports: this runs in the browser too.
+// Finding links in message bodies. The markdown parser (src/lib/markdown.ts) uses urlAt both for the server,
+// which unfurls links, and for the renderer, which makes them clickable, so both agree on what counts as a
+// link. No Node.js imports: this runs in the browser too.
 
 export const MAX_LINKS_PER_MESSAGE = 3;
 export const MAX_URL_LENGTH = 2048;
 
-const URL_PATTERN = /\bhttps?:\/\/[^\s<>"]+/gi;
+const URL_PATTERN = /https?:\/\/[^\s<>"]+/iy;
 const TRAILING_PUNCTUATION = /[.,;:!?'*_~]+$/;
-
-export type LinkPart = string | { url: string };
 
 // "(see https://example.com/a_(b))." keeps the balanced ")" but drops the one that closes the sentence.
 function trimUrl(raw: string) {
@@ -18,18 +17,14 @@ function trimUrl(raw: string) {
   return url;
 }
 
-export function parseLinks(text: string): LinkPart[] {
-  const parts: LinkPart[] = [];
-  let last = 0;
-  for (const match of text.matchAll(URL_PATTERN)) {
-    const url = trimUrl(match[0]);
-    if (!normalizeUrl(url)) continue;
-    if (match.index > last) parts.push(text.slice(last, match.index));
-    parts.push({ url });
-    last = match.index + url.length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
+// The http(s) link starting exactly at `index`, if any. A link must not start inside a word.
+export function urlAt(text: string, index: number): string | null {
+  if (index > 0 && /\w/.test(text[index - 1])) return null;
+  URL_PATTERN.lastIndex = index;
+  const match = URL_PATTERN.exec(text);
+  if (!match) return null;
+  const url = trimUrl(match[0]);
+  return normalizeUrl(url) ? url : null;
 }
 
 // The cache key for a link: parsed, without the fragment (servers never see it) or credentials.
@@ -50,16 +45,4 @@ const GIF_URL = /^https:\/\/media\d?\.giphy\.com\/media\/[A-Za-z0-9]+\/[\w-]+\.(
 
 export function isGifUrl(url: string) {
   return GIF_URL.test(url);
-}
-
-// The distinct links in a message, in order, to unfurl. GIFs are already shown inline, so they are skipped.
-export function extractLinks(body: string) {
-  const urls = new Set<string>();
-  for (const part of parseLinks(body)) {
-    if (typeof part === "string" || isGifUrl(part.url)) continue;
-    const url = normalizeUrl(part.url);
-    if (url) urls.add(url);
-    if (urls.size === MAX_LINKS_PER_MESSAGE) break;
-  }
-  return [...urls];
 }

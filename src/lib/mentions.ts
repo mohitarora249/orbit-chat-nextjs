@@ -25,6 +25,18 @@ export function parseMentions(body: string): MentionPart[] {
   return parts;
 }
 
+const TOKEN_AT = new RegExp(TOKEN.source, "y");
+
+// The mention token starting exactly at `index`, if any, and its length.
+export function mentionAt(body: string, index: number): { part: Exclude<MentionPart, string>; length: number } | null {
+  TOKEN_AT.lastIndex = index;
+  const match = TOKEN_AT.exec(body);
+  if (!match) return null;
+  return { part: match[1] ? { kind: "user", userId: match[1] } : { kind: match[2] as BroadcastMention }, length: match[0].length };
+}
+
+export const mentionToken = (part: Exclude<MentionPart, string>) => part.kind === "user" ? userToken(part.userId) : broadcastToken(part.kind);
+
 // Plain-text form for notifications, previews and the edit box. People `nameOf` cannot resolve become
 // `unknown`, or keep their raw token when it is null (so editing a message does not drop the mention).
 export function mentionsToText(body: string, nameOf: (userId: string) => string | undefined, unknown: string | null = "unknown user") {

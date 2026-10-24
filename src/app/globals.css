@@ -53,6 +53,13 @@
   --amber-900: 22 78% 26%;
   --amber-950: 21 92% 14%;
 
+  --hl-keyword: 280 60% 45%;
+  --hl-string: 140 50% 32%;
+  --hl-number: 25 85% 42%;
+  --hl-title: 215 75% 45%;
+  --hl-type: 190 70% 33%;
+  --hl-attr: 345 60% 45%;
+
   --shadow-soft: 0 1px 2px rgba(24, 24, 32, 0.04), 0 12px 32px -8px rgba(24, 24, 40, 0.12);
   --shadow-float: 0 1px 2px rgba(24, 24, 32, 0.06), 0 4px 12px -2px rgba(24, 24, 40, 0.08);
 }
@@ -107,6 +114,13 @@
   --amber-900: 46 90% 82%;
   --amber-950: 21 92% 14%;
 
+  --hl-keyword: 285 70% 74%;
+  --hl-string: 120 40% 66%;
+  --hl-number: 30 85% 68%;
+  --hl-title: 210 85% 72%;
+  --hl-type: 185 60% 64%;
+  --hl-attr: 350 75% 74%;
+
   --shadow-soft: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 12px 32px -8px rgba(0, 0, 0, 0.6);
   --shadow-float: 0 0 0 1px rgba(255, 255, 255, 0.02), 0 4px 12px -2px rgba(0, 0, 0, 0.45);
 }
@@ -143,3 +157,16 @@ textarea:focus-visible, input:focus-visible { outline: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* Syntax highlighting in code blocks (lowlight emits highlight.js classes). Colors follow the theme. */
+.hljs-comment, .hljs-quote { color: hsl(var(--zinc-400)); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-meta .hljs-keyword { color: hsl(var(--hl-keyword)); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-meta .hljs-string { color: hsl(var(--hl-string)); }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-variable.constant_ { color: hsl(var(--hl-number)); }
+.hljs-title, .hljs-section, .hljs-title.function_ { color: hsl(var(--hl-title)); }
+.hljs-type, .hljs-built_in, .hljs-title.class_, .hljs-selector-class, .hljs-selector-id { color: hsl(var(--hl-type)); }
+.hljs-attr, .hljs-attribute, .hljs-name, .hljs-tag, .hljs-property, .hljs-variable, .hljs-template-variable, .hljs-params { color: hsl(var(--hl-attr)); }
+.hljs-meta, .hljs-link { color: hsl(var(--zinc-500)); }
+.hljs-deletion { color: hsl(var(--rose-600)); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }

@@ -10,6 +10,7 @@ import { nextMondayAt9, tomorrowAt9, WhenMenu, inMinutes, type WhenOption } from
 import { dayLabel, isGrouped, timeLabel } from "@/components/chat/helpers";
 import type { MessageOp } from "@/components/chat/pending";
 import { api } from "@/lib/api";
+import { markdownToText } from "@/lib/markdown";
 import { mentionsToText } from "@/lib/mentions";
 import { customStatus, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { cn } from "@/lib/utils";
@@ -117,7 +118,7 @@ export function ActivityPanel({ usersById, conversationName, onOpen, onClose }: 
                 <span className="text-zinc-400">{activityIcons[item.kind]}</span>
                 <span className="truncate"><b className="font-medium text-zinc-900">{item.actor.displayName}</b> {item.kind === "mention" ? "mentioned you" : item.kind === "reply" ? "replied in a thread" : <>reacted {item.emoji}</>}</span>
               </div>
-              <p className="mt-1 line-clamp-2 text-[13px] leading-5 text-zinc-700">{mentionsToText(item.message.body, id => usersById.get(id)?.displayName) || "(attachment)"}</p>
+              <p className="mt-1 line-clamp-2 text-[13px] leading-5 text-zinc-700">{mentionsToText(markdownToText(item.message.body), id => usersById.get(id)?.displayName) || "(attachment)"}</p>
               <p className="mt-1 flex items-center gap-1 text-[11px] text-zinc-400"><Hash size={10}/>{conversationName(item.conversationId)} · {dayLabel(item.at)} at {timeLabel(item.at)}</p>
             </div>
           </button>
@@ -184,7 +185,7 @@ export function ReminderSubject({ reminder, usersById }: { reminder: ChatReminde
       <p className="text-zinc-500">{message.parentId ? "Thread reply" : "Message"} from <b className="font-semibold text-zinc-900">{author}</b></p>
       {message.deleted
         ? <p className="italic text-zinc-400">The message was deleted.</p>
-        : <p className="line-clamp-3 whitespace-pre-wrap break-words text-zinc-800">{mentionsToText(message.body, id => usersById.get(id)?.displayName) || "Sent an attachment"}</p>}
+        : <p className="line-clamp-3 whitespace-pre-wrap break-words text-zinc-800">{mentionsToText(markdownToText(message.body), id => usersById.get(id)?.displayName) || "Sent an attachment"}</p>}
     </div>
   );
 }

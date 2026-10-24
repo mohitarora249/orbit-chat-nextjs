@@ -22,6 +22,7 @@ import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { parsePollArgs, parseReminder, parseStatus, reminderTimeLabel, type SlashCommandName } from "@/lib/commands";
 import { isGifUrl } from "@/lib/links";
+import { markdownToText } from "@/lib/markdown";
 import { encodeMentions, mentionsMe, mentionsToText, mentionTargets } from "@/lib/mentions";
 import { customStatus, IDLE_AFTER_MS, isDnd, presenceLabels, untilLabel, type Presence, type UserStatus } from "@/lib/presence";
 import { playSound, primeSounds } from "@/lib/sounds";
@@ -438,7 +439,7 @@ export function ChatApp() {
     if (conversation && !inSidebar(conversation)) return;
     if (!mentionsMe(message.body, state.me.id) && conversation?.type !== "DM") return;
     const where = conversation?.type === "DM" ? "" : ` in #${conversation?.name ?? "a channel"}`;
-    const body = mentionsToText(message.body, id => state.users.find(user => user.id === id)?.displayName);
+    const body = mentionsToText(markdownToText(message.body), id => state.users.find(user => user.id === id)?.displayName);
     const notification = new Notification(`${message.author.displayName}${where}`, { body: body || (message.forwarded ? "Forwarded a message" : "Sent an attachment"), tag: message.id });
     notification.onclick = () => {
       window.focus();
@@ -454,7 +455,7 @@ export function ChatApp() {
     if (!state || isDnd(state.statuses[state.me.id])) return;
     if (current.sound) playSound("mention");
     if (!current.desktop || typeof Notification === "undefined" || Notification.permission !== "granted" || document.visibilityState === "visible") return;
-    const about = reminder.message && !reminder.message.deleted ? mentionsToText(reminder.message.body, id => state.users.find(user => user.id === id)?.displayName) : "";
+    const about = reminder.message && !reminder.message.deleted ? mentionsToText(markdownToText(reminder.message.body), id => state.users.find(user => user.id === id)?.displayName) : "";
     const notification = new Notification("Reminder", { body: reminder.text || about || "About a message", tag: `reminder-${reminder.id}` });
     notification.onclick = () => {
       window.focus();
@@ -1608,7 +1609,7 @@ export function ChatApp() {
                     <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-amber-400 text-amber-950"><AtSign size={10} strokeWidth={3}/></span>
                     <span className="truncate"><b className="font-semibold text-zinc-900">{mentionToast.message.author.displayName}</b> {mentionToast.kind === "direct" ? "mentioned you" : `notified @${mentionToast.kind}`} in {mentionToast.where}</span>
                   </span>
-                  <span className="mt-1 line-clamp-2 block text-[13px] leading-5 text-zinc-800">{mentionsToText(mentionToast.message.body, id => usersById.get(id)?.displayName)}</span>
+                  <span className="mt-1 line-clamp-2 block text-[13px] leading-5 text-zinc-800">{mentionsToText(markdownToText(mentionToast.message.body), id => usersById.get(id)?.displayName)}</span>
                   <span className="mt-1.5 block text-[11px] font-medium text-amber-700">View message</span>
                 </span>
               </button>
